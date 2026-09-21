@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+config.json
+.cli-inspector/
+archive/
+*.egg-info/
+.DS_Store
+.claude/
+webapp/node_modules/

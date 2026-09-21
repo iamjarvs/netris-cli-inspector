@@ -1,0 +1,10 @@
+{
+  "netris_url": "https://adam-ctl.netris.io",
+  "netris_username": "netris",
+  "netris_password": "your-password",
+  "ssh_jump_host": "adam-ctl.netris.io",
+  "ssh_jump_port": 22,
+  "ssh_jump_user": "ubuntu",
+  "ssh_switch_user": "cumulus",
+  "archive_dir": "~/.cli-inspector/archive"
+}

@@ -1,0 +1,66 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap") layer(base);
+@import "tailwindcss";
+
+@theme {
+  --font-outfit: Outfit, sans-serif;
+
+  --color-brand-25: #FFF0F4;
+  --color-brand-50: #FFE5EC;
+  --color-brand-100: #FFCCD9;
+  --color-brand-200: #FC9CB4;
+  --color-brand-300: #FB6A8E;
+  --color-brand-400: #FF4D79;
+  --color-brand-500: #FF3366;
+  --color-brand-600: #E60039;
+  --color-brand-700: #C20030;
+  --color-brand-800: #9F042B;
+  --color-brand-900: #7E0724;
+  --color-brand-950: #4B0617;
+
+  --color-success-25: #F6FEF9;
+  --color-success-50: #ECFDF3;
+  --color-success-500: #12B76A;
+  --color-success-600: #039855;
+
+  --color-warning-25: #FFFCF5;
+  --color-warning-50: #FFFAEB;
+  --color-warning-500: #F79009;
+  --color-warning-600: #DC6803;
+
+  --color-error-25: #FFFBFA;
+  --color-error-50: #FEF3F2;
+  --color-error-500: #F04438;
+  --color-error-600: #D92D20;
+
+  --color-info-25: #F5FBFF;
+  --color-info-50: #F0F9FF;
+  --color-info-500: #0BA5EC;
+  --color-info-600: #0086C9;
+
+  --text-title-md: 36px;
+  --text-title-md--line-height: 44px;
+  --text-title-sm: 30px;
+  --text-title-sm--line-height: 38px;
+  --text-theme-xl: 20px;
+  --text-theme-xl--line-height: 30px;
+  --text-theme-sm: 14px;
+  --text-theme-sm--line-height: 20px;
+  --text-theme-xs: 12px;
+  --text-theme-xs--line-height: 18px;
+
+  --shadow-theme-xs: 0px 1px 2px 0px rgba(16, 24, 40, 0.05);
+  --shadow-theme-sm: 0px 1px 3px 0px rgba(16, 24, 40, 0.10), 0px 1px 2px 0px rgba(16, 24, 40, 0.06);
+  --shadow-theme-md: 0px 4px 8px -2px rgba(16, 24, 40, 0.10), 0px 2px 4px -2px rgba(16, 24, 40, 0.06);
+  --shadow-theme-lg: 0px 12px 16px -4px rgba(16, 24, 40, 0.08), 0px 4px 6px -2px rgba(16, 24, 40, 0.03);
+  --shadow-theme-xl: 0px 20px 24px -4px rgba(16, 24, 40, 0.08), 0px 8px 8px -4px rgba(16, 24, 40, 0.03);
+}
+
+@layer base {
+  body {
+    @apply relative font-normal font-outfit bg-gray-50 text-gray-700;
+  }
+}
+
+@utility shadow-focus-brand {
+  box-shadow: 0px 0px 0px 4px rgba(255, 51, 102, 0.12);
+}
