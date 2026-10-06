@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { getHealth } from '../../api'
-import { MenuIcon } from '../icons'
+import { CollapseSidebarIcon, ExpandSidebarIcon, MenuIcon } from '../icons'
 
-export default function Header({ onMenuClick }) {
+export default function Header({ onMenuClick, isCollapsed, onToggleCollapse }) {
   const [status, setStatus] = useState('checking')
 
   useEffect(() => {
@@ -45,14 +45,31 @@ export default function Header({ onMenuClick }) {
 
   return (
     <header className="sticky top-0 z-30 flex h-[72px] items-center justify-between border-b border-gray-200 bg-white px-4 md:px-6">
-      <button
-        onClick={onMenuClick}
-        className="flex h-10 w-10 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 lg:hidden"
-        aria-label="Toggle menu"
-      >
-        <MenuIcon className="h-5 w-5" />
-      </button>
-      <div className="hidden lg:block" />
+      <div className="flex items-center gap-3">
+        {/* Mobile menu hamburger */}
+        <button
+          onClick={onMenuClick}
+          className="flex h-10 w-10 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 lg:hidden"
+          aria-label="Toggle menu"
+        >
+          <MenuIcon className="h-5 w-5" />
+        </button>
+
+        {/* Desktop collapse toggle */}
+        <button
+          onClick={onToggleCollapse}
+          className="hidden lg:flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors"
+          title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label="Toggle sidebar"
+        >
+          {isCollapsed ? (
+            <ExpandSidebarIcon className="h-4.5 w-4.5" />
+          ) : (
+            <CollapseSidebarIcon className="h-4.5 w-4.5" />
+          )}
+        </button>
+      </div>
+
       <div className="flex items-center gap-2 text-theme-sm">
         <span className={`h-2 w-2 rounded-full ${statusDot}`} />
         <span className={statusTextClasses}>{statusText}</span>

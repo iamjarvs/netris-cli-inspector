@@ -213,9 +213,10 @@ class SwitchExecutor:
         # jump host) -- one retry with a fresh connection clears this up
         # reliably, so bulk fleet-wide operations don't report false
         # per-device failures from a transient jump-host hiccup.
+        conn_timeout = max(1, min(timeout, 8)) if timeout else 8
         remote_cmd = (
             f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o BatchMode=yes -o ConnectTimeout=8 "
+            f"-o BatchMode=yes -o ConnectTimeout={conn_timeout} "
             f"{self.switch_user}@{mgmt_address} {shlex.quote(command)}"
         )
         last_error: Exception | None = None

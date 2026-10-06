@@ -23,7 +23,7 @@ In modern automated AI fabrics powered by Netris and NVIDIA Cumulus Linux (NVUE)
 - **On-Box Garbage Collection**: Cumulus Linux's native `nv config history` retains only a small rolling window of recent revisions before automatically pruning them (`Unknown revision`). This tool introduces a durable local git-backed archive that preserves full configuration histories indefinitely.
 - **Side-by-Side Switch Comparisons**: Rapidly identify configuration drift or ASIC table discrepancies between two leaf switches (e.g. `leaf-0` vs `leaf-1`) using structural JSON and colored unified diffs.
 - **Command Catalog**: Verified, curated command set covering NVUE operational tables (`show system`, `show interface`, `show vrf`, `show evpn`) and low-level `vtysh` state.
-- **Dual Execution Interfaces**: Full-featured interactive terminal TUI (`questionary` + `rich`) and a sleek, modern React 18 / TailAdmin v2 web dashboard.
+- **Real-Time Watch Mode**: Continuously monitor the fabric for Netris Controller API writes and on-box switch configuration changes. Instantly identifies affected switches vs unchanged switches and displays newly added (+) and removed (-) configuration lines per device in both CLI and Web UI.
 - **Fabric Isolation & Assurance**: Live hardware table audits proving multi-tenant EVPN VNI separation and pure VRF FIB partitioning, backed by in-cluster ping tests.
 
 ---
@@ -84,9 +84,16 @@ sequenceDiagram
 cd cli-inspector
 ./run.sh
 ```
-*(Automatically creates a `.venv`, installs requirements, and runs `main.py`).*
+*(Select **"Watch mode (live config monitor & diff reviewer)"** from the main menu or within **"Config history & snapshots"**).*
 
-### Option C: Web Dashboard (React + Flask)
+### Option C: Standalone Watch Mode Daemon
+```bash
+cd cli-inspector
+.venv/bin/python watch.py --site Datacenter-A --poll 10
+```
+*(Continuously monitors Netris Controller writes and switch NVUE configs, alerting on product activity, pinpointing affected switches, and displaying per-switch added `+` and removed `-` configuration commands).*
+
+### Option D: Web Dashboard (React + Flask)
 ```bash
 # Terminal 1: Backend API (Port 8743)
 cd cli-inspector

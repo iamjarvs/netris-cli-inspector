@@ -177,3 +177,91 @@ def get_relevant_write_logs(
         if any(keep in url for keep in CONFIG_RELEVANT_URL_SUBSTRINGS):
             relevant.append(item)
     return relevant
+
+
+RESOURCE_TYPE_MAP = {
+    "/server-cluster": "Server Cluster",
+    "/vnet": "V-Net",
+    "/ebgp": "eBGP Session",
+    "/acl": "ACL",
+    "/nat": "NAT",
+    "/ipam": "IPAM",
+    "/link": "Physical Link",
+    "/ports": "Port Configuration",
+    "/reservation": "IPAM Reservation",
+    "/l4lb": "L4 Load Balancer",
+    "/hw": "Hardware Inventory",
+}
+
+
+def summarize_api_log(log_item: dict) -> dict:
+    """Parses a raw /api/apilogs entry into a structured, human-readable summary
+    explaining what product resource was modified.
+    """
+    url = log_item.get("url", "")
+    method = log_item.get("method", "WRITE")
+    user = log_item.get("user") or "unknown"
+    created_at = log_item.get("createdAt", "")
+
+    # Match resource type
+    res_type = "Resource"
+    for endpoint, label in RESOURCE_TYPE_MAP.items():
+        if endpoint in url:
+            res_type = label
+            break
+
+    # Parse body if JSON
+    body_data = {}
+    raw_body = log_item.get("body", "")
+    if isinstance(raw_body, str) and raw_body.strip():
+        try:
+            body_data = jsonlib.loads(raw_body)
+        except Exception:
+            body_data = {}
+    elif isinstance(raw_body, dict):
+        body_data = raw_body
+
+    name = log_item.get("name") or body_data.get("name") or ""
+    site_info = body_data.get("site")
+    site_id = site_info.get("id") if isinstance(site_info, dict) else None
+    vpc_info = body_data.get("vpc")
+    vpc_name = vpc_info.get("name") if isinstance(vpc_info, dict) else (vpc_info if isinstance(vpc_info, str) else None)
+
+    # Human-readable action verb
+    action_verb = {
+        "POST": "Created",
+        "PUT": "Updated",
+        "PATCH": "Modified",
+        "DELETE": "Deleted",
+    }.get(method, method)
+
+    extra_parts = []
+    if name:
+        extra_parts.append(f"'{name}'")
+    if vpc_name:
+        extra_parts.append(f"VPC: {vpc_name}")
+    if site_id:
+        extra_parts.append(f"Site ID: {site_id}")
+
+    details_str = f" ({', '.join(extra_parts)})" if extra_parts else ""
+    summary_text = f"[{user}] {action_verb} {res_type}{details_str} via {method} {url}"
+
+    return {
+        "id": log_item.get("id", ""),
+        "timestamp": created_at,
+        "user": user,
+        "method": method,
+        "url": url,
+        "resource_type": res_type,
+        "resource_name": name,
+        "site_id": site_id,
+        "vpc_name": vpc_name,
+        "action": action_verb,
+        "summary": summary_text,
+        "payload": body_data if body_data else (raw_body if raw_body else None),
+        "raw_body": raw_body,
+        "ip": log_item.get("ip", ""),
+        "trace": log_item.get("trace"),
+    }
+
+

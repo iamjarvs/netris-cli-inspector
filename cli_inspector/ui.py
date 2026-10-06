@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .diff_utils import dumps_relaxed
+from .diff_utils import DeviceDiffResult, dumps_relaxed
 from rich.text import Text
 
 console = Console()
@@ -391,3 +391,144 @@ def render_ping_results(res: dict) -> None:
     table.add_row("IPMI / BMC eth11", ipmi.get("ip", ""), f"[{ipmi_color}]{ipmi.get('status', 'FAIL')}[/{ipmi_color}]")
 
     console.print(table)
+
+
+# -- Watch Mode UI -----------------------------------------------------------
+
+def render_watch_header(site_name: str, device_count: int, poll_interval: int) -> None:
+    text = Text()
+    text.append("⚡ LIVE WATCH MODE — Switch Config & Drift Monitor\n", style="bold cyan")
+    text.append("Site: ", style="dim")
+    text.append(f"{site_name}  ", style="bold white")
+    text.append("• Devices: ", style="dim")
+    text.append(f"{device_count} switches  ", style="bold green")
+    text.append("• Polling: ", style="dim")
+    text.append(f"every {poll_interval}s  ", style="yellow")
+    text.append("• Review: ", style="dim")
+    text.append("Live Config Diffs\n", style="magenta")
+    text.append("Listening for Netris Controller API writes & on-box switch config changes... (Ctrl+C to stop)", style="italic white")
+    console.print(Panel(text, border_style="cyan", box=box.ROUNDED))
+
+
+def render_product_event_alert(event: dict) -> None:
+    title = f"⚡ Netris Product Activity Detected — {event.get('resource_type', 'Config')}"
+    body = Text()
+    body.append(f"Time:   {event.get('timestamp', '')}\n", style="dim")
+    body.append(f"User:   {event.get('user', '')}\n", style="cyan")
+    body.append(f"Action: {event.get('method', '')} {event.get('url', '')}\n", style="bold yellow")
+    body.append(f"Event:  {event.get('summary', '')}\n", style="bold white")
+    console.print(Panel(body, title=title, border_style="yellow", box=box.ROUNDED))
+
+
+def render_affected_devices_summary(affected_devices: list[str], unchanged_devices: list[str], trigger: str = "") -> None:
+    title = f"Change Detection — {len(affected_devices)} switch(es) affected"
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("Status", style="bold", width=14)
+    table.add_column("Count", justify="right", width=8)
+    table.add_column("Devices", style="white")
+
+    if affected_devices:
+        table.add_row(
+            "[bold green]✔ Changed[/bold green]",
+            str(len(affected_devices)),
+            "[bold cyan]" + ", ".join(affected_devices) + "[/bold cyan]",
+        )
+    else:
+        table.add_row("[dim]Unchanged[/dim]", "0", "[dim]None[/dim]")
+
+    if unchanged_devices:
+        table.add_row(
+            "[dim]· Unchanged[/dim]",
+            str(len(unchanged_devices)),
+            f"[dim]{len(unchanged_devices)} switches identical[/dim]" if len(unchanged_devices) > 6 else "[dim]" + ", ".join(unchanged_devices) + "[/dim]",
+        )
+
+    console.print(table)
+
+
+def render_device_config_diff(diff_res: DeviceDiffResult, role: str = "", trigger: str = "") -> None:
+    """Renders a dedicated review panel for an affected switch, showing
+    exact added (new) commands and removed commands with clean syntax coloring.
+    """
+    dev_title = f"Switch: {diff_res.device}" + (f" [{role}]" if role else "")
+    panel_title = f"{dev_title} — {diff_res.summary}"
+
+    body = Text()
+    if trigger:
+        body.append(f"Trigger: {trigger}\n\n", style="dim italic")
+
+    # Added / New config section
+    body.append("▲ NEW / ADDED CONFIGURATION:\n", style="bold green")
+    if diff_res.added_lines:
+        for line in diff_res.added_lines:
+            body.append(f"  + {line}\n", style="green")
+    else:
+        body.append("  (none)\n", style="dim")
+
+    body.append("\n")
+
+    # Removed config section
+    body.append("▼ REMOVED CONFIGURATION:\n", style="bold red")
+    if diff_res.removed_lines:
+        for line in diff_res.removed_lines:
+            body.append(f"  - {line}\n", style="red")
+    else:
+        body.append("  (none)\n", style="dim")
+
+    console.print(Panel(body, title=panel_title, border_style="cyan", box=box.ROUNDED))
+
+
+def render_device_context_summary(context: dict, device: str = "") -> None:
+    """Renders a breakdown of device topology context:
+    - Default VRF loopback IP & Router-ID
+    - VRFs, VRF loopback IPs, VNIs, VLANs, and active services
+    """
+    if not context:
+        return
+    title = f"Topology Context — {device}" if device else "Topology Context"
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("VRF", style="bold cyan")
+    table.add_column("Loopback IP", style="white")
+    table.add_column("VNI", style="dim")
+    table.add_column("Member VLANs & SVIs", style="yellow")
+    table.add_column("Services", style="green")
+
+    # Default row
+    lo = context.get("default_loopback") or "—"
+    rid = context.get("router_id") or "—"
+    asn = context.get("asn") or "—"
+    table.add_row(
+        "[bold]default[/bold]",
+        f"{lo} (rid: {rid})",
+        f"ASN: {asn}",
+        "—",
+        "—",
+    )
+
+    for vrf in context.get("vrfs", []):
+        vlan_parts = []
+        for vl in vrf.get("vlans", []):
+            s = vl.get("vlan", "")
+            if vl.get("ip"):
+                s += f" ({vl['ip']})"
+            vlan_parts.append(s)
+        vlan_str = ", ".join(vlan_parts) if vlan_parts else "—"
+
+        srv_parts = []
+        for srv in vrf.get("services", []):
+            if isinstance(srv, dict):
+                srv_parts.append(f"{srv.get('type')}: {srv.get('server')}")
+            else:
+                srv_parts.append(str(srv))
+        srv_str = "; ".join(srv_parts) if srv_parts else "—"
+
+        table.add_row(
+            vrf.get("name", ""),
+            vrf.get("loopback") or "[dim]—[/dim]",
+            str(vrf.get("vni") or "—"),
+            vlan_str,
+            srv_str,
+        )
+
+    console.print(table)
+

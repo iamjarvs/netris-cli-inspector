@@ -1,105 +1,87 @@
-"""Long-running watcher: polls Netris /api/apilogs for config-relevant write
-calls and snapshots the archive once activity goes quiet for a few minutes --
-collapsing a whole burst of related NVUE revisions (confirmed live to span
-up to ~16 minutes for one logical change) into a single, meaningful archive
-commit per device. A periodic safety-net snapshot runs regardless, covering
-anything that bypasses the Netris API entirely (e.g. a manual CLI change).
-
-Run standalone: `.venv/bin/python watch.py` (or `-m cli_inspector.watcher`).
-Not part of the interactive menu -- meant to be left running in its own
-terminal or as a systemd unit, alongside menu.py's on-demand snapshots.
+"""Watcher daemon and standalone CLI entry point.
+Continuously monitors Netris Controller API writes and switch fabric configs,
+identifies affected devices, and reviews per-device new/removed configuration.
 """
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
+import argparse
+import sys
+from typing import Optional
 
-from . import archive
 from .config import load_config
 from .executor import SwitchExecutor
-from .inventory import build_client, get_relevant_write_logs, list_all_switches, list_sites
-from .menu import probe_site_reachable
-
-POLL_INTERVAL = 15
-QUIET_PERIOD = 180
-SAFETY_NET_INTERVAL = 1800
+from .inventory import build_client, list_all_switches, list_sites
+from .watch_mode import WatchEngine
 
 
-def _reachable_devices(client, executor):
+def _resolve_devices(client, executor, site_filter: Optional[str] = None):
     devices = [d for d in list_all_switches(client) if d.mgmt_address]
     sites = list_sites(client)
-    reachable_site_ids = set()
-    for site in sites:
-        site_devices = [d for d in devices if d.site_id == site.id]
-        if site_devices and probe_site_reachable(executor, site_devices):
-            reachable_site_ids.add(site.id)
+    site_map = {s.name.lower(): s.id for s in sites}
+
+    if site_filter:
+        target_id = site_map.get(site_filter.lower())
+        if target_id is not None:
+            devices = [d for d in devices if d.site_id == target_id]
+        else:
+            devices = [d for d in devices if site_filter.lower() in d.site_name.lower()]
+
+    # Filter to sites with hardware
+    reachable_site_ids = {s.id for s in sites if s.has_hardware}
     return [d for d in devices if d.site_id in reachable_site_ids]
 
 
 def run(
-    poll_interval: int = POLL_INTERVAL,
-    quiet_period: int = QUIET_PERIOD,
-    safety_net_interval: int = SAFETY_NET_INTERVAL,
+    site_name: Optional[str] = None,
+    poll_interval: int = 10,
+    interactive: bool = True,
 ):
     cfg = load_config()
     client = build_client(cfg)
     executor = SwitchExecutor(
-        cfg["ssh_jump_host"], cfg["ssh_jump_port"], cfg["ssh_jump_user"], cfg["ssh_switch_user"]
+        cfg["ssh_jump_host"],
+        cfg["ssh_jump_port"],
+        cfg["ssh_jump_user"],
+        cfg["ssh_switch_user"],
     )
-    archive.ensure_archive_repo(cfg["archive_dir"])
-
-    print(f"[watcher] starting -- poll={poll_interval}s quiet={quiet_period}s safety_net={safety_net_interval}s")
-    devices = _reachable_devices(client, executor)
-    print(f"[watcher] watching {len(devices)} reachable device(s)")
-    if not devices:
-        print("[watcher] no reachable devices found, exiting")
-        return
-
-    pairs = [(d.name, d.mgmt_address) for d in devices]
-    last_poll_epoch = int(time.time())
-    dirty_since: float | None = None
-    last_snapshot = time.time()
-
-    def do_snapshot(trigger: str):
-        nonlocal last_snapshot
-        print(f"[watcher] snapshotting {len(pairs)} device(s), trigger={trigger}")
-        results = executor.get_full_config_commands_many(pairs)
-        configs = {name: r.stdout for name, r in results.items() if r.ok}
-        failed = [name for name, r in results.items() if not r.ok]
-        meta = {"timestamp": datetime.now(timezone.utc).isoformat(), "trigger": trigger}
-        snap_results = archive.snapshot_many(cfg["archive_dir"], configs, meta)
-        changed = sum(1 for v in snap_results.values() if v)
-        print(f"[watcher] snapshot done: {changed} changed, {len(snap_results) - changed} unchanged"
-              + (f", {len(failed)} failed to fetch" if failed else ""))
-        last_snapshot = time.time()
 
     try:
-        while True:
-            time.sleep(poll_interval)
-            now_epoch = int(time.time())
-            try:
-                logs = get_relevant_write_logs(client, last_poll_epoch, now_epoch)
-            except Exception as e:
-                print(f"[watcher] apilogs poll failed: {e}")
-                logs = []
-            last_poll_epoch = now_epoch
+        devices = _resolve_devices(client, executor, site_filter=site_name)
+        if not devices:
+            print(f"[watcher] No reachable devices found" + (f" for site '{site_name}'" if site_name else ""))
+            return
 
-            if logs:
-                print(f"[watcher] {len(logs)} relevant write call(s) detected, resetting quiet timer")
-                dirty_since = time.time()
-
-            if dirty_since is not None and (time.time() - dirty_since) >= quiet_period:
-                do_snapshot("watcher")
-                dirty_since = None
-
-            if time.time() - last_snapshot >= safety_net_interval:
-                do_snapshot("periodic-safety-net")
-    except KeyboardInterrupt:
-        print("\n[watcher] stopping.")
+        engine = WatchEngine(
+            cfg=cfg,
+            client=client,
+            executor=executor,
+            site_name=site_name or (devices[0].site_name if devices else "Fabric"),
+            devices=devices,
+            poll_interval=poll_interval,
+            interactive=interactive,
+        )
+        engine.run()
     finally:
         executor.close()
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Monitor switch configurations live for changes and review diffs per device."
+    )
+    parser.add_argument("--site", type=str, default=None, help="Filter to a specific Netris site (e.g. Datacenter-A)")
+    parser.add_argument("--poll", type=int, default=10, help="Polling interval in seconds (default: 10)")
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run continuously in non-interactive streaming mode (no prompts on detected diffs)",
+    )
+    args = parser.parse_args()
+
+    is_interactive = not args.daemon and sys.stdin.isatty()
+    run(site_name=args.site, poll_interval=args.poll, interactive=is_interactive)
+
+
 if __name__ == "__main__":
-    run()
+    main()

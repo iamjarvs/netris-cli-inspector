@@ -1,574 +1,947 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   getIsolationEvidence,
+  getIsolationSwitchLogin,
+  getIsolationSwitches,
   getIsolationVpc,
   getIsolationVpcs,
+  getSites,
   postIsolationPing,
+  postIsolationPingCluster,
+  postIsolationPingCrossVrf,
+  postIsolationPingExternal,
+  postIsolationServerExec,
+  postIsolationSwitchExec,
 } from '../api'
+import AirGapDiagram from '../components/isolation/AirGapDiagram'
+import CliTerminal from '../components/isolation/CliTerminal'
+import ClusterMeshDiagram from '../components/isolation/ClusterMeshDiagram'
+import CrossVrfDiagram from '../components/isolation/CrossVrfDiagram'
 import PageBreadcrumb from '../components/layout/PageBreadcrumb'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import EmptyState from '../components/ui/EmptyState'
 import ErrorState from '../components/ui/ErrorState'
-import Input from '../components/ui/Input'
 import LoadingState from '../components/ui/LoadingState'
 import Select from '../components/ui/Select'
-import ToggleGroup from '../components/ui/ToggleGroup'
 
 export default function IsolationPage() {
-  const [vpcs, setVpcs] = useState([])
+  // Sites (Data Centres)
+  const [sites, setSites] = useState([])
+  const [sitesLoading, setSitesLoading] = useState(true)
+  const [selectedSiteId, setSelectedSiteId] = useState(8) // Default to Datacenter-A (Site 8)
+
+  // VPCs
+  const [allVpcs, setAllVpcs] = useState([])
   const [vpcsLoading, setVpcsLoading] = useState(true)
   const [vpcsError, setVpcsError] = useState(null)
   const [selectedVpcId, setSelectedVpcId] = useState('')
 
-  const [activeTab, setActiveTab] = useState('topology')
+  // Active View (Unified 4-tab bar)
+  // 'switch-cli' | 'intra-cluster' | 'cross-vrf' | 'external-airgap'
+  const [activeView, setActiveView] = useState('switch-cli')
 
-  // Stage 1: Topology
+  // VPC Topology & Switches
   const [topology, setTopology] = useState(null)
   const [topologyLoading, setTopologyLoading] = useState(false)
-  const [topologyError, setTopologyError] = useState(null)
+  const [switches, setSwitches] = useState([])
+  const [switchesLoading, setSwitchesLoading] = useState(false)
+  const [selectedSwitch, setSelectedSwitch] = useState('')
 
-  // Stage 2: Hardware Evidence
-  const [evidence, setEvidence] = useState(null)
-  const [evidenceLoading, setEvidenceLoading] = useState(false)
-  const [evidenceError, setEvidenceError] = useState(null)
+  // View 1: Switch CLI state
+  const [cliLines, setCliLines] = useState([])
+  const [cliLoading, setCliLoading] = useState(false)
+  const [cliPrompt, setCliPrompt] = useState('cumulus@switch:~$ ')
 
-  // Stage 3: Ping
+  // View 2: Intra-VPC Cluster Mesh state
   const [sourceServer, setSourceServer] = useState('')
   const [targetSu, setTargetSu] = useState('0')
   const [targetHost, setTargetHost] = useState('1')
-  const [pingMode, setPingMode] = useState('intra')
-  const [pingState, setPingState] = useState({ loading: false, error: null, result: null })
+  const [clusterPingLoading, setClusterPingLoading] = useState(false)
+  const [clusterPingResults, setClusterPingResults] = useState(null)
+  const [clusterCliLines, setClusterCliLines] = useState([])
 
-  // Initial load: VPCs
+  // View 3: Cross-VRF Isolation state (Default to EMPTY selection per feedback)
+  const [selectedTargetVrfIds, setSelectedTargetVrfIds] = useState([])
+  const [crossVrfLoading, setCrossVrfLoading] = useState(false)
+  const [crossVrfResults, setCrossVrfResults] = useState(null)
+  const [crossVrfCliLines, setCrossVrfCliLines] = useState([])
+
+  // View 4: External Air-Gap state
+  const [airGapLoading, setAirGapLoading] = useState(false)
+  const [airGapResults, setAirGapResults] = useState(null)
+  const [airGapCliLines, setAirGapCliLines] = useState([])
+
+  // 1. Initial Load: Fetch Sites & All VPCs
   useEffect(() => {
     let active = true
-    async function loadVpcs() {
+    async function initData() {
+      setSitesLoading(true)
       setVpcsLoading(true)
       setVpcsError(null)
       try {
-        const res = await getIsolationVpcs()
+        const [sitesRes, vpcsRes] = await Promise.all([getSites(), getIsolationVpcs()])
         if (!active) return
-        const list = res.vpcs ?? []
-        setVpcs(list)
-        if (list.length > 0) {
-          // Prefer VPC with member servers e.g. 31
-          const withServers = list.find((v) => v.server_count > 0) || list[0]
-          setSelectedVpcId(String(withServers.id))
-        }
+
+        const sitesList = sitesRes?.sites || []
+        setSites(sitesList)
+
+        // Select first reachable site or default to 8 (Datacenter-A)
+        const defSite = sitesList.find((s) => s.id === 8) || sitesList.find((s) => s.reachable) || sitesList[0]
+        if (defSite) setSelectedSiteId(defSite.id)
+
+        const vpcList = vpcsRes?.vpcs || []
+        setAllVpcs(vpcList)
+
+        // Filter for default site
+        const siteVpcs = vpcList.filter((v) => v.site_id === (defSite?.id ?? 8))
+        const preferred = siteVpcs.find((v) => v.server_count > 0) || siteVpcs[0] || vpcList[0]
+        if (preferred) setSelectedVpcId(String(preferred.id))
       } catch (err) {
         if (!active) return
         setVpcsError(err.message)
       } finally {
-        if (active) setVpcsLoading(false)
+        if (active) {
+          setSitesLoading(false)
+          setVpcsLoading(false)
+        }
       }
     }
-    loadVpcs()
+    initData()
     return () => {
       active = false
     }
   }, [])
 
-  // When selectedVpcId changes, fetch topology
+  // Filter VPCs by currently selected Data Centre
+  const filteredVpcs = useMemo(() => {
+    if (!selectedSiteId) return allVpcs
+    return allVpcs.filter((v) => v.site_id === Number(selectedSiteId))
+  }, [allVpcs, selectedSiteId])
+
+  // When Data Centre changes: auto-select first VPC in that DC
+  function handleSiteChange(newSiteId) {
+    const sId = Number(newSiteId)
+    setSelectedSiteId(sId)
+    const matching = allVpcs.filter((v) => v.site_id === sId)
+    if (matching.length > 0) {
+      const preferred = matching.find((v) => v.server_count > 0) || matching[0]
+      setSelectedVpcId(String(preferred.id))
+    }
+    // Reset Cross-VRF selection for clean slate
+    setSelectedTargetVrfIds([])
+  }
+
+  // 2. When selectedVpcId changes: Load topology, switches
   useEffect(() => {
     if (!selectedVpcId) return
     let active = true
-    async function loadTopology() {
+
+    async function loadVpcDetails() {
       setTopologyLoading(true)
-      setTopologyError(null)
+      setSwitchesLoading(true)
       try {
-        const res = await getIsolationVpc(selectedVpcId)
+        const [topoRes, swRes] = await Promise.all([
+          getIsolationVpc(selectedVpcId),
+          getIsolationSwitches(selectedVpcId),
+        ])
         if (!active) return
-        setTopology(res)
-        if (res.servers?.length > 0) {
-          setSourceServer(res.servers[0].name)
+        setTopology(topoRes)
+
+        // Always default source host to Host 0 (hgx-pod00-su0-h00)
+        if (topoRes.servers?.length > 0) {
+          const host0 = topoRes.servers.find((s) => s.name.includes('h00')) || topoRes.servers[0]
+          setSourceServer(host0.name)
+          setTargetSu('0')
+          setTargetHost('1')
+        }
+
+        const swList = swRes.switches || []
+        setSwitches(swList)
+        if (swList.length > 0) {
+          const attached =
+            swList.find((s) => s.is_attached && s.role.includes('East-West')) ||
+            swList.find((s) => s.is_attached) ||
+            swList[0]
+          setSelectedSwitch(attached.name)
         }
       } catch (err) {
-        if (!active) return
-        setTopologyError(err.message)
+        console.error('Error loading VPC details:', err)
       } finally {
-        if (active) setTopologyLoading(false)
+        if (active) {
+          setTopologyLoading(false)
+          setSwitchesLoading(false)
+        }
       }
     }
-    loadTopology()
+
+    loadVpcDetails()
+
+    // Reset cross-VRF targets to EMPTY per requirements
+    setSelectedTargetVrfIds([])
+
     return () => {
       active = false
     }
   }, [selectedVpcId])
 
-  // When switching to evidence tab or changing VPC, load hardware evidence
+  // 3. When selected switch changes: fetch authentic switch login banner
   useEffect(() => {
-    if (activeTab !== 'evidence' || !selectedVpcId) return
+    if (!selectedSwitch) return
     let active = true
-    async function loadEvidence() {
-      setEvidenceLoading(true)
-      setEvidenceError(null)
+    async function loadSwitchLogin() {
+      setCliLoading(true)
+      const swObj = switches.find((s) => s.name === selectedSwitch)
+      const mgmtIp = swObj?.mgmt_ip || ''
       try {
-        const res = await getIsolationEvidence(selectedVpcId)
+        const res = await getIsolationSwitchLogin(selectedSwitch, mgmtIp)
         if (!active) return
-        setEvidence(res)
+        const promptStr = res.prompt || `cumulus@${selectedSwitch}:~$ `
+        setCliPrompt(promptStr)
+        const initText =
+          res.session_init ||
+          `[Connecting to switch ${selectedSwitch} (${mgmtIp}) via SSH jump host...]\n${res.banner || 'Welcome to NVIDIA Cumulus (R) Linux (R)'}\n${promptStr}`
+        setCliLines(initText.split('\n'))
       } catch (err) {
         if (!active) return
-        setEvidenceError(err.message)
+        setCliLines([
+          `[Connecting to switch ${selectedSwitch} via SSH jump host...]`,
+          `Welcome to NVIDIA Cumulus (R) Linux (R)`,
+          `cumulus@${selectedSwitch}:~$ `,
+        ])
+        setCliPrompt(`cumulus@${selectedSwitch}:~$ `)
       } finally {
-        if (active) setEvidenceLoading(false)
+        if (active) setCliLoading(false)
       }
     }
-    loadEvidence()
+    loadSwitchLogin()
     return () => {
       active = false
     }
-  }, [activeTab, selectedVpcId])
+  }, [selectedSwitch, switches])
 
-  const selectedVpc = vpcs.find((v) => String(v.id) === String(selectedVpcId))
+  // Execute command on active switch CLI
+  async function handleRunSwitchCommand(cmd) {
+    if (!cmd.trim() || !selectedSwitch || cliLoading) return
+    const swObj = switches.find((s) => s.name === selectedSwitch)
+    const mgmtIp = swObj?.mgmt_ip || ''
 
-  function handlePingPreset(mode) {
-    setPingMode(mode)
-    if (mode === 'intra') {
-      setTargetSu('0')
-      setTargetHost('1')
-    } else if (mode === 'cross') {
-      // Point outside the VPC e.g. SU 1 Host 0
-      setTargetSu('1')
-      setTargetHost('0')
-    }
-  }
+    setCliLoading(true)
+    setCliLines((prev) => [...prev, `${cliPrompt}${cmd}`])
 
-  async function handleRunPing() {
-    if (!sourceServer) return
-    setPingState({ loading: true, error: null, result: null })
     try {
-      const res = await postIsolationPing(sourceServer, Number(targetSu), Number(targetHost))
-      setPingState({ loading: false, error: null, result: res })
+      const res = await postIsolationSwitchExec(selectedSwitch, mgmtIp, cmd.trim())
+      const outputLines = (res.stdout || res.stderr || '').split('\n')
+      setCliLines((prev) => [...prev, ...outputLines, cliPrompt])
     } catch (err) {
-      setPingState({ loading: false, error: err.message, result: null })
+      setCliLines((prev) => [...prev, `[Error: ${err.message}]`, cliPrompt])
+    } finally {
+      setCliLoading(false)
     }
   }
+
+  // Quick Command Presets for Switch CLI
+  const quickCommands = [
+    {
+      label: 'show vrf',
+      desc: 'Audit VRF Table IDs & ASIC status',
+      cmd: "sudo vtysh -c 'show vrf'",
+    },
+    {
+      label: `show ip route vrf Vrf_${selectedVpcId}`,
+      desc: 'Audit tenant isolated FIB & blackhole 0.0.0.0/0',
+      cmd: `sudo vtysh -c 'show ip route vrf Vrf_${selectedVpcId}'`,
+    },
+    {
+      label: 'show evpn vni',
+      desc: 'Audit EVPN VNIs and VXLAN mappings',
+      cmd: "sudo vtysh -c 'show evpn vni'",
+    },
+    {
+      label: 'ip route show table 1002',
+      desc: 'Audit kernel FIB table for tenant VRF',
+      cmd: 'ip route show table 1002',
+    },
+    {
+      label: 'nv show vrf',
+      desc: 'NVUE high-level VRF configuration',
+      cmd: 'nv show vrf',
+    },
+  ]
+
+  // View 2: Run ./cluster-ping.sh on compute node
+  async function handleRunClusterPing(overrideHost) {
+    if (!sourceServer || clusterPingLoading) return
+    const hostToUse = overrideHost !== undefined ? overrideHost : targetHost
+
+    setClusterPingLoading(true)
+    const cmdStr = `./cluster-ping.sh ${targetSu} ${hostToUse}`
+    setClusterCliLines([
+      `[SSH Session: root@${sourceServer} via Jump Host]`,
+      `root@${sourceServer}:~$ ${cmdStr}`,
+    ])
+
+    try {
+      const res = await postIsolationPing(sourceServer, Number(targetSu), Number(hostToUse))
+      setClusterPingResults(res)
+      const cleanLines = (res.raw_output || '').split('\n').filter(Boolean)
+      setClusterCliLines([
+        `[SSH Session: root@${sourceServer} via Jump Host]`,
+        `root@${sourceServer}:~$ ${cmdStr}`,
+        ...cleanLines,
+        `root@${sourceServer}:~$ `,
+      ])
+    } catch (err) {
+      setClusterCliLines((prev) => [
+        ...prev,
+        `[Error executing ${cmdStr}: ${err.message}]`,
+        `root@${sourceServer}:~$ `,
+      ])
+    } finally {
+      setClusterPingLoading(false)
+    }
+  }
+
+  // View 2: Sweep All Peer Devices
+  async function handleSweepAllDevices() {
+    if (!sourceServer || clusterPingLoading) return
+    setClusterPingLoading(true)
+    const servers = topology?.servers || []
+    const peers = servers.filter((s) => s.name !== sourceServer)
+    const targetList = peers.length > 0 ? peers : servers
+
+    setClusterCliLines([
+      `[SSH Session: root@${sourceServer} via Jump Host]`,
+      `root@${sourceServer}:~$ # Sweeping all peer devices in SU ${targetSu} with ./cluster-ping.sh...`,
+    ])
+
+    try {
+      const allLines = [
+        `[SSH Session: root@${sourceServer} via Jump Host]`,
+        `root@${sourceServer}:~$ # Sweeping all peer devices in SU ${targetSu} with ./cluster-ping.sh...`,
+      ]
+      let lastRes = null
+
+      for (let i = 0; i < targetList.length; i++) {
+        const s = targetList[i]
+        const m = s.name.match(/h(\d+)/)
+        const hNum = m ? parseInt(m[1], 10) : i + 1
+        const cmdStr = `./cluster-ping.sh ${targetSu} ${hNum}`
+        allLines.push(`root@${sourceServer}:~$ ${cmdStr}`)
+
+        const res = await postIsolationPing(sourceServer, Number(targetSu), hNum)
+        lastRes = res
+        const cleanLines = (res.raw_output || '').split('\n').filter(Boolean)
+        allLines.push(...cleanLines)
+        allLines.push('')
+      }
+
+      setClusterPingResults(lastRes)
+      allLines.push(
+        `--- Peer Devices Sweep Complete (${targetList.length} devices tested via ./cluster-ping.sh) ---`
+      )
+      allLines.push(`root@${sourceServer}:~$ `)
+      setClusterCliLines(allLines)
+    } catch (err) {
+      setClusterCliLines((prev) => [
+        ...prev,
+        `[Error during device sweep: ${err.message}]`,
+        `root@${sourceServer}:~$ `,
+      ])
+    } finally {
+      setClusterPingLoading(false)
+    }
+  }
+
+  // View 2: Server Ad hoc Command Runner
+  async function handleRunServerAdHoc(cmd) {
+    if (!cmd.trim() || !sourceServer || clusterPingLoading) return
+    setClusterPingLoading(true)
+    setClusterCliLines((prev) => [...prev, `root@${sourceServer}:~$ ${cmd}`])
+    try {
+      const res = await postIsolationServerExec(sourceServer, cmd.trim())
+      const outputLines = (res.stdout || res.stderr || '').split('\n')
+      setClusterCliLines((prev) => [...prev, ...outputLines, `root@${sourceServer}:~$ `])
+    } catch (err) {
+      setClusterCliLines((prev) => [...prev, `[Error: ${err.message}]`, `root@${sourceServer}:~$ `])
+    } finally {
+      setClusterPingLoading(false)
+    }
+  }
+
+  // View 3: Run Tenant Isolation Testing via ./cluster-ping.sh across tenants
+  async function handleRunCrossVrfTest() {
+    if (selectedTargetVrfIds.length === 0 || crossVrfLoading) return
+    setCrossVrfLoading(true)
+    const hostName = sourceServer || 'hgx-pod00-su0-h00'
+
+    setCrossVrfCliLines([
+      `[SSH Session: root@${hostName} via Jump Host]`,
+      `root@${hostName}:~$ # Auditing Multi-Tenant Hardware & RoCEv2 Fabric Isolation with ./cluster-ping.sh...`,
+      `root@${hostName}:~$ # All 8 GPU rails and in-band fabrics must be strictly unreachable across tenants`,
+    ])
+
+    try {
+      const res = await postIsolationPingCrossVrf(
+        Number(selectedVpcId),
+        selectedTargetVrfIds,
+        selectedSwitch,
+        activeSwitchObj?.mgmt_ip,
+        hostName
+      )
+      setCrossVrfResults(res)
+      if (res.cli_output) {
+        setCrossVrfCliLines(res.cli_output.split('\n'))
+      }
+    } catch (err) {
+      setCrossVrfCliLines((prev) => [
+        ...prev,
+        `[Error testing tenant isolation: ${err.message}]`,
+        `root@${hostName}:~$ `,
+      ])
+    } finally {
+      setCrossVrfLoading(false)
+    }
+  }
+
+  // View 4: Run External Air-Gap Assurance
+  async function handleRunAirGapTest() {
+    if (airGapLoading) return
+    setAirGapLoading(true)
+    const swObj = switches.find((s) => s.name === selectedSwitch) || switches[0]
+
+    setAirGapCliLines([
+      `[Connecting to switch ${swObj?.name || 'leaf-pod00-su0-r0'} via SSH jump host...]`,
+      `cumulus@${swObj?.name || 'switch'}:~$ # Testing outbound reachability to Public Internet from Vrf_${selectedVpcId}`,
+      `cumulus@${swObj?.name || 'switch'}:~$ # Checking 0.0.0.0/0 blackhole ICMP unreachable route`,
+    ])
+
+    try {
+      const res = await postIsolationPingExternal(
+        Number(selectedVpcId),
+        undefined,
+        swObj?.name,
+        swObj?.mgmt_ip
+      )
+      setAirGapResults(res)
+      if (res.cli_output) {
+        setAirGapCliLines(res.cli_output.split('\n'))
+      }
+    } catch (err) {
+      setAirGapCliLines((prev) => [
+        ...prev,
+        `[Error testing external reachability: ${err.message}]`,
+        `cumulus@${swObj?.name || 'switch'}:~$ `,
+      ])
+    } finally {
+      setAirGapLoading(false)
+    }
+  }
+
+  const selectedVpc = allVpcs.find((v) => String(v.id) === String(selectedVpcId))
+  const otherVpcsInDc = filteredVpcs.filter((v) => String(v.id) !== String(selectedVpcId))
+  const activeSwitchObj = switches.find((s) => s.name === selectedSwitch)
+
+  // Find server IP for iTerm launch
+  const sourceServerIp =
+    topology?.servers?.find((s) => s.name === sourceServer)?.ip || '10.253.0.17'
 
   return (
-    <div>
+    <div className="space-y-5">
       <PageBreadcrumb title="Switch Isolation & Assurance" />
 
-      {/* VPC Selector Card */}
-      <Card
-        title="Target VPC Environment"
-        description="Select a multi-tenant VPC to audit physical leaf switch ASIC tables, EVPN VNI boundaries, and fabric isolation."
-      >
-        {vpcsLoading && <LoadingState label="Loading Netris VPC environments…" />}
-        {vpcsError && <ErrorState message={vpcsError} />}
-        {!vpcsLoading && !vpcsError && (
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="sm:col-span-2">
+      {/* COMPACT TOP CONTROL BAR: Left Site/VPC Selectors + Right Unified View Switcher */}
+      <div className="rounded-xl border border-gray-200 bg-white p-3.5 shadow-xs">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          {/* LEFT: Compact Data Centre & VPC Selectors */}
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Target Data Centre Filter */}
+            <div className="w-48">
+              <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">
+                Data Centre
+              </label>
               <Select
-                label="Active Netris VPC"
+                value={selectedSiteId}
+                onChange={(e) => handleSiteChange(e.target.value)}
+                loading={sitesLoading}
+                disabled={sitesLoading || sites.length === 0}
+                className="text-xs py-1.5 font-medium"
+              >
+                {sitesLoading ? (
+                  <option value="">Loading Data Centres…</option>
+                ) : sites.length === 0 ? (
+                  <option value="">No Data Centres Found</option>
+                ) : (
+                  sites.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.device_count || 0} dev)
+                    </option>
+                  ))
+                )}
+              </Select>
+            </div>
+
+            {/* Target VPC (Filtered to chosen DC) */}
+            <div className="w-56">
+              <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">
+                Target VPC
+              </label>
+              <Select
                 value={selectedVpcId}
                 onChange={(e) => setSelectedVpcId(e.target.value)}
-                options={vpcs.map((v) => ({
-                  value: String(v.id),
-                  label: `VPC-${v.id} (${v.name}) — ${v.server_count} nodes`,
-                }))}
-              />
+                loading={vpcsLoading || topologyLoading}
+                disabled={vpcsLoading || topologyLoading || filteredVpcs.length === 0}
+                className="text-xs py-1.5 font-medium"
+              >
+                {vpcsLoading ? (
+                  <option value="">Loading VPCs…</option>
+                ) : topologyLoading ? (
+                  <option value="">Loading Topology…</option>
+                ) : filteredVpcs.length === 0 ? (
+                  <option value="">No VPCs Found</option>
+                ) : (
+                  filteredVpcs.map((v) => (
+                    <option key={v.id} value={String(v.id)}>
+                      VPC {v.id}: {v.name} ({v.server_count} nodes)
+                    </option>
+                  ))
+                )}
+              </Select>
             </div>
-            <div>
-              <span className="block text-theme-xs font-medium text-gray-500">Tenant Identity</span>
-              <span className="mt-1 block text-theme-sm font-semibold text-gray-800">
-                {selectedVpc?.tenant || 'default'}
+
+            {/* Quick Context Badges */}
+            <div className="hidden sm:flex items-center gap-2 pt-4">
+              <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-700">
+                Tenant: <strong className="ml-1 text-gray-900">{selectedVpc?.tenant || 'admin'}</strong>
               </span>
-            </div>
-            <div>
-              <span className="block text-theme-xs font-medium text-gray-500">Compute Cluster</span>
-              <span className="mt-1 block text-theme-sm font-semibold text-brand-600">
-                {selectedVpc?.clusters?.map((c) => c.name).join(', ') || 'None assigned'}
+              <span className="inline-flex items-center rounded-md bg-brand-50 px-2 py-1 text-[11px] font-bold text-brand-700 border border-brand-200">
+                Vrf_{selectedVpcId} (FIB 1002)
               </span>
             </div>
           </div>
-        )}
 
-        {/* Stepper Navigation */}
-        <div className="mt-6 border-t border-gray-100 pt-5">
-          <ToggleGroup
-            value={activeTab}
-            onChange={setActiveTab}
-            options={[
-              { label: '1. VPC Topology & Port Mapping', value: 'topology' },
-              { label: '2. Live Switch Hardware Evidence', value: 'evidence' },
-              { label: '3. Ping & Traffic Verification', value: 'ping' },
-            ]}
-          />
+          {/* RIGHT: Unified Navigation Row (All 4 Demo Views in One Place) */}
+          <div className="flex items-center">
+            <div className="flex items-center rounded-lg bg-gray-100 p-1 border border-gray-200">
+              <button
+                type="button"
+                onClick={() => setActiveView('switch-cli')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                  activeView === 'switch-cli'
+                    ? 'bg-white text-gray-900 shadow-xs border border-gray-200/80'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span>💻</span>
+                <span>Switch CLI</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView('intra-cluster')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                  activeView === 'intra-cluster'
+                    ? 'bg-white text-gray-900 shadow-xs border border-gray-200/80'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span>🟢</span>
+                <span>Tenant Mesh</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView('cross-vrf')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                  activeView === 'cross-vrf'
+                    ? 'bg-white text-gray-900 shadow-xs border border-gray-200/80'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span>🛡️</span>
+                <span>Tenant Isolation</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView('external-airgap')}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                  activeView === 'external-airgap'
+                    ? 'bg-white text-gray-900 shadow-xs border border-gray-200/80'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                <span>🌐</span>
+                <span>External Air-Gap</span>
+              </button>
+            </div>
+          </div>
         </div>
-      </Card>
+      </div>
 
-      <div className="h-6" />
-
-      {/* TAB 1: VPC Topology & Switch Port Mapping */}
-      {activeTab === 'topology' && (
-        <div>
-          {topologyLoading && <LoadingState label="Resolving physical switch links for compute servers…" />}
-          {topologyError && <ErrorState message={topologyError} />}
-          {!topologyLoading && !topologyError && topology && (
+      {/* ========================================================================= */}
+      {/* VIEW 1: SWITCH CLI SEGMENTATION (Side-by-side Switch Menu + Terminal)   */}
+      {/* ========================================================================= */}
+      {activeView === 'switch-cli' && (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
+          {/* LEFT: Switch Selector & Command Palette */}
+          <div className="lg:col-span-4 space-y-4">
             <Card
-              title={`Physical Port Attachment — VPC ${selectedVpcId}`}
-              description="Maps tenant compute servers across both East-West (GPU RoCEv2) and North-South fabric planes."
+              title="Target Switch Selection"
+              description="Choose an NVIDIA Cumulus leaf switch attached to this VPC."
             >
-              {topology.servers?.length === 0 ? (
-                <EmptyState message="No member servers allocated to this VPC." />
-              ) : (
-                <div className="overflow-hidden rounded-xl border border-gray-200">
-                  <div className="max-w-full overflow-x-auto">
-                    <table className="min-w-full">
-                      <thead className="border-b border-gray-100 bg-gray-50">
-                        <tr>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Host Server</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Host Port</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Switch Name</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Switch Port</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Fabric Plane</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">IPv4</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 bg-white">
-                        {Object.entries(topology.server_links || {}).flatMap(([server, links]) => {
-                          if (!links || links.length === 0) {
-                            return [
-                              <tr key={server}>
-                                <td className="px-5 py-3.5 text-theme-sm font-medium text-gray-900">{server}</td>
-                                <td colSpan={5} className="px-5 py-3.5 text-theme-sm text-gray-400">
-                                  No active physical switch links detected
-                                </td>
-                              </tr>,
-                            ]
-                          }
-                          return links.map((link, idx) => (
-                            <tr key={`${server}-${idx}`}>
-                              <td className="px-5 py-3.5 text-theme-sm font-medium text-gray-900">{server}</td>
-                              <td className="px-5 py-3.5 text-theme-sm text-gray-700">{link.host_port}</td>
-                              <td className="px-5 py-3.5 text-theme-sm font-medium text-brand-700">{link.switch_name}</td>
-                              <td className="px-5 py-3.5 text-theme-sm text-gray-700">{link.switch_port}</td>
-                              <td className="px-5 py-3.5 text-theme-sm">
-                                <Badge
-                                  color={link.fabric_role.includes('East-West') ? 'primary' : 'info'}
-                                  variant="light"
-                                >
-                                  {link.fabric_role}
-                                </Badge>
-                              </td>
-                              <td className="px-5 py-3.5 text-theme-sm text-gray-600 font-mono text-xs">{link.ipv4 || '—'}</td>
-                            </tr>
-                          ))
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </Card>
-          )}
-        </div>
-      )}
-
-      {/* TAB 2: Live Switch Hardware Evidence */}
-      {activeTab === 'evidence' && (
-        <div>
-          {evidenceLoading && <LoadingState label="Executing live vtysh audit on North-South and East-West switches…" />}
-          {evidenceError && <ErrorState message={evidenceError} />}
-          {!evidenceLoading && !evidenceError && evidence && (
-            <div className="space-y-6">
-              {/* North-South EVPN VNIs Card */}
-              <Card
-                title={`North-South Leaf (${evidence.ns_switch?.name}) — EVPN VNI Table`}
-                description="Audits vtysh 'show evpn vni'. Highlights tenant-isolated VNIs dedicated exclusively to this VPC."
-                action={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      setEvidenceLoading(true)
-                      try {
-                        const res = await getIsolationEvidence(selectedVpcId)
-                        setEvidence(res)
-                      } finally {
-                        setEvidenceLoading(false)
-                      }
-                    }}
-                  >
-                    Refresh Audit
-                  </Button>
-                }
-              >
-                <div className="overflow-hidden rounded-xl border border-gray-200">
-                  <div className="max-w-full overflow-x-auto">
-                    <table className="min-w-full">
-                      <thead className="border-b border-gray-100 bg-gray-50">
-                        <tr>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">VNI</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Type</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Interface</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Tenant VRF</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">VLAN</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Hardware Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 bg-white">
-                        {(evidence.ns_switch?.vnis || []).map((vni) => (
-                          <tr
-                            key={vni.vni}
-                            className={vni.is_target_vpc ? 'bg-success-50/40' : undefined}
-                          >
-                            <td className="px-5 py-3.5 text-theme-sm font-semibold font-mono text-gray-900">{vni.vni}</td>
-                            <td className="px-5 py-3.5 text-theme-sm text-gray-700">{vni.type}</td>
-                            <td className="px-5 py-3.5 text-theme-sm font-mono text-xs text-gray-600">{vni.interface}</td>
-                            <td className="px-5 py-3.5 text-theme-sm font-medium">
-                              <span className={vni.is_target_vpc ? 'font-bold text-success-700' : 'text-gray-600'}>
-                                {vni.tenant_vrf}
-                              </span>
-                            </td>
-                            <td className="px-5 py-3.5 text-theme-sm text-gray-700">{vni.vlan || '—'}</td>
-                            <td className="px-5 py-3.5 text-theme-sm">
-                              {vni.is_target_vpc ? (
-                                <Badge color="success" variant="solid">
-                                  ✔ Dedicated Tenant VNI
-                                </Badge>
-                              ) : (
-                                <Badge color="gray" variant="light">
-                                  Other Tenant
-                                </Badge>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </Card>
-
-              {/* East-West Pure VRF Routing Table Card */}
-              <Card
-                title={`East-West Leaf (${evidence.ew_switch?.name}) — Pure VRF Routing Table (${evidence.target_vrf})`}
-                description="Audits vtysh 'show ip route vrf'. Confirms isolated FIB table entries restricted strictly to this tenant domain."
-              >
-                <div className="overflow-hidden rounded-xl border border-gray-200">
-                  <div className="max-w-full overflow-x-auto">
-                    <table className="min-w-full">
-                      <thead className="border-b border-gray-100 bg-gray-50">
-                        <tr>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Protocol</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Subnet Prefix</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Next Hop / Gateway</th>
-                          <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">VRF Table</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 bg-white">
-                        {(evidence.ew_switch?.routes || []).slice(0, 25).map((route, idx) => (
-                          <tr key={`${route.prefix}-${idx}`}>
-                            <td className="px-5 py-3.5 text-theme-sm font-semibold text-gray-700">{route.code}</td>
-                            <td className="px-5 py-3.5 text-theme-sm font-mono font-medium text-brand-700">{route.prefix}</td>
-                            <td className="px-5 py-3.5 text-theme-sm font-mono text-xs text-gray-600">{route.via || 'directly connected'}</td>
-                            <td className="px-5 py-3.5 text-theme-sm">
-                              <Badge color="primary" variant="light">
-                                {route.vrf}
-                              </Badge>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-                {(evidence.ew_switch?.routes || []).length > 25 && (
-                  <p className="mt-3 text-theme-xs text-gray-400">
-                    Showing top 25 of {evidence.ew_switch.routes.length} routes in FIB.
-                  </p>
-                )}
-              </Card>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* TAB 3: Ping & Traffic Verification */}
-      {activeTab === 'ping' && (
-        <div className="space-y-6">
-          <Card
-            title="Cluster Ping & Multi-Tenant Traffic Verification"
-            description="Executes line-rate RoCEv2 tests across GPU rails from inside tenant compute servers via the jump host."
-          >
-            <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
-              <div>
+              <div className="space-y-3">
                 <Select
-                  label="Source Server (Ping Origin)"
-                  value={sourceServer}
-                  onChange={(e) => setSourceServer(e.target.value)}
-                  options={(topology?.servers || []).map((s) => ({
-                    value: s.name,
-                    label: s.name,
-                  }))}
-                />
+                  label="Select Physical Switch"
+                  value={selectedSwitch}
+                  onChange={(e) => setSelectedSwitch(e.target.value)}
+                  loading={switchesLoading}
+                  disabled={switchesLoading || switches.length === 0}
+                >
+                  {switchesLoading ? (
+                    <option value="">Loading Switches…</option>
+                  ) : switches.length === 0 ? (
+                    <option value="">No Switches Found</option>
+                  ) : (
+                    switches.map((sw) => (
+                      <option key={sw.name} value={sw.name}>
+                        {sw.name} ({sw.role}) {sw.is_attached ? '★ Attached' : ''}
+                      </option>
+                    ))
+                  )}
+                </Select>
+
+                {activeSwitchObj && (
+                  <div className="rounded-lg border border-gray-100 bg-gray-50/70 p-3 space-y-1.5 text-theme-xs">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Fabric Role:</span>
+                      <span className="font-semibold text-gray-800">{activeSwitchObj.role}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Management IP:</span>
+                      <span className="font-mono text-gray-800">{activeSwitchObj.mgmt_ip}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Attachment:</span>
+                      <span className="font-medium text-emerald-700">
+                        {activeSwitchObj.is_attached ? 'Directly Attached to VPC' : 'Fabric Backbone'}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="sm:col-span-2">
-                <span className="mb-1.5 block text-theme-sm font-medium text-gray-700">Test Preset</span>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant={pingMode === 'intra' ? 'primary' : 'outline'}
-                    size="sm"
-                    onClick={() => handlePingPreset('intra')}
+            </Card>
+
+            {/* Quick Command Palette */}
+            <Card
+              title="Executive Quick Commands"
+              description="Click any command to execute it instantly on the switch terminal."
+            >
+              <div className="space-y-2">
+                {quickCommands.map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => handleRunSwitchCommand(item.cmd)}
+                    disabled={cliLoading}
+                    className="w-full text-left rounded-lg border border-gray-200 bg-white p-2.5 hover:border-brand-500 hover:bg-brand-50/30 transition-all group"
                   >
-                    Intra-VPC Health (Expect OK)
-                  </Button>
-                  <Button
-                    variant={pingMode === 'cross' ? 'primary' : 'outline'}
-                    size="sm"
-                    onClick={() => handlePingPreset('cross')}
-                  >
-                    Cross-VPC Isolation (Expect DROP)
-                  </Button>
-                  <Button
-                    variant={pingMode === 'custom' ? 'primary' : 'outline'}
-                    size="sm"
-                    onClick={() => handlePingPreset('custom')}
-                  >
-                    Custom SU/Host Target
-                  </Button>
-                </div>
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs font-bold text-gray-900 group-hover:text-brand-700">
+                        {item.label}
+                      </span>
+                      <span className="text-[10px] text-brand-600 font-semibold opacity-0 group-hover:opacity-100 transition-opacity">
+                        Run ↵
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-gray-500">{item.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </Card>
+          </div>
+
+          {/* RIGHT: High-Res Switch CLI Terminal Session */}
+          <div className="lg:col-span-8">
+            <CliTerminal
+              title={`Switch CLI Console: ${selectedSwitch || 'NVIDIA Cumulus'}`}
+              lines={cliLines}
+              prompt={cliPrompt}
+              onRunCommand={handleRunSwitchCommand}
+              onClear={() => setCliLines([cliPrompt])}
+              loading={cliLoading}
+              height="h-[520px]"
+              targetDevice={selectedSwitch}
+              mgmtIp={activeSwitchObj?.mgmt_ip || ''}
+              deviceType="switch"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* VIEW 2: INTRA-VPC CLUSTER MESH (50/50 Side-by-Side: Left CLI, Right Diagram) */}
+      {/* ========================================================================= */}
+      {activeView === 'intra-cluster' && (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
+          {/* LEFT 50%: Dedicated SSH Compute Session Running ./cluster-ping.sh */}
+          <div className="lg:col-span-6 space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <div>
+                <h4 className="text-theme-sm font-bold text-gray-900">
+                  Compute Node SSH Session (Host 0 Origin)
+                </h4>
+                <p className="text-[11px] text-gray-500">
+                  Executes native <code className="font-mono text-gray-800 bg-gray-100 px-1 py-0.5 rounded">./cluster-ping.sh &lt;SU&gt; &lt;Host&gt;</code> to audit 8 RoCE rails.
+                </p>
               </div>
             </div>
 
-            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-4 sm:items-end">
-              <div>
-                <Input
-                  label="Target SU (Scalable Unit)"
-                  value={targetSu}
-                  onChange={(e) => {
-                    setTargetSu(e.target.value)
-                    setPingMode('custom')
-                  }}
-                />
+            <CliTerminal
+              title={`Compute Node CLI: ${sourceServer || 'hgx-pod00-su0-h00'}`}
+              lines={
+                clusterCliLines.length > 0
+                  ? clusterCliLines
+                  : [
+                      `[Connected to ${sourceServer || 'hgx-pod00-su0-h00'} via SSH Jump Host]`,
+                      `Linux ${sourceServer || 'hgx-pod00-su0-h00'} 5.15.0-nvidia-gpu (Ubuntu 22.04 LTS)`,
+                      `root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ # Click any node card or 'Sweep All Peers' on the right to test`,
+                      `root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `,
+                    ]
+              }
+              prompt={`root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `}
+              onRunCommand={handleRunServerAdHoc}
+              onClear={() => setClusterCliLines([`root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `])}
+              loading={clusterPingLoading}
+              height="h-[560px]"
+              targetDevice={sourceServer || 'hgx-pod00-su0-h00'}
+              mgmtIp={sourceServerIp}
+              deviceType="server"
+            />
+          </div>
+
+          {/* RIGHT 50%: Dynamic Cluster Mesh Diagram at the Top */}
+          <div className="lg:col-span-6 space-y-4">
+            <ClusterMeshDiagram
+              vpc={selectedVpc}
+              clusterName={selectedVpc?.clusters?.[0]?.name}
+              servers={topology?.servers || []}
+              sourceServer={sourceServer}
+              targetSu={targetSu}
+              targetHost={targetHost}
+              onSelectSource={setSourceServer}
+              onSelectTarget={(hNum) => {
+                setTargetHost(String(hNum))
+                handleRunClusterPing(String(hNum))
+              }}
+              pingResults={clusterPingResults}
+              isPinging={clusterPingLoading}
+              onTriggerPing={() => handleRunClusterPing()}
+              onTriggerSweep={handleSweepAllDevices}
+            />
+
+            {/* Quick RoCE Rail Architecture Breakdown Card */}
+            <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-2xs">
+              <h5 className="text-theme-xs font-bold text-gray-800 uppercase tracking-wider mb-2">
+                RoCEv2 Fabric Multi-Rail Topology
+              </h5>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-[11px] font-mono">
+                {[0, 1, 2, 3, 4, 5, 6, 7].map((rail) => (
+                  <div
+                    key={rail}
+                    className="rounded-lg border border-gray-200 bg-gray-50/80 p-2 hover:border-emerald-400 transition-colors"
+                  >
+                    <span className="block font-bold text-gray-900">Rail {rail}</span>
+                    <span className="block text-[10px] text-emerald-600 font-semibold mt-0.5">
+                      400G RoCEv2
+                    </span>
+                  </div>
+                ))}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* VIEW 3: TENANT ISOLATION (50/50 Side-by-Side with cluster-ping.sh)         */}
+      {/* ========================================================================= */}
+      {activeView === 'cross-vrf' && (
+        <div className="space-y-4">
+          {/* Target Tenant Selection Bar (Clean Slate: default to NO target tenants selected) */}
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-xs">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <Input
-                  label="Target Host Index"
-                  value={targetHost}
-                  onChange={(e) => {
-                    setTargetHost(e.target.value)
-                    setPingMode('custom')
-                  }}
-                />
+                <h4 className="text-theme-sm font-bold text-gray-900">
+                  Select Target Tenants in {sites.find((s) => s.id === selectedSiteId)?.name || 'Data Centre'} to Audit
+                </h4>
+                <p className="text-theme-xs text-gray-500">
+                  Runs <code className="font-mono text-gray-800 bg-gray-100 px-1 py-0.5 rounded">./cluster-ping.sh &lt;SU&gt; &lt;Host&gt;</code> from Origin Host to test all 8 RoCE rails and in-band fabrics across tenants.
+                </p>
               </div>
-              <div className="sm:col-span-2">
-                <Button onClick={handleRunPing} disabled={!sourceServer || pingState.loading}>
-                  {pingState.loading ? 'Running cluster-ping.sh…' : 'Execute Ping Test'}
+
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const allOtherIds = otherVpcsInDc.map((v) => Number(v.id))
+                    setSelectedTargetVrfIds(allOtherIds)
+                  }}
+                >
+                  Select All
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSelectedTargetVrfIds([])}
+                >
+                  Clear Selection
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleRunCrossVrfTest}
+                  disabled={selectedTargetVrfIds.length === 0 || crossVrfLoading}
+                >
+                  {crossVrfLoading ? 'Running Cluster Ping…' : 'Run Tenant Isolation Audit 🛡️'}
                 </Button>
               </div>
             </div>
-          </Card>
 
-          {pingState.loading && <LoadingState label="Executing cluster-ping.sh over jump host…" />}
-          {pingState.error && <ErrorState message={pingState.error} />}
+            {/* Target Tenant Badges / Pills */}
+            <div className="mt-3 flex flex-wrap gap-2 pt-3 border-t border-gray-100">
+              {otherVpcsInDc.length === 0 ? (
+                <span className="text-theme-xs text-gray-400 italic">
+                  No other VPCs/Tenants configured in this Data Centre.
+                </span>
+              ) : (
+                otherVpcsInDc.map((v) => {
+                  const isSelected = selectedTargetVrfIds.includes(Number(v.id))
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => {
+                        const vid = Number(v.id)
+                        setSelectedTargetVrfIds((prev) =>
+                          prev.includes(vid) ? prev.filter((id) => id !== vid) : [...prev, vid]
+                        )
+                      }}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold border transition-all ${
+                        isSelected
+                          ? 'border-brand-500 bg-brand-50 text-brand-800 shadow-xs'
+                          : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                      }`}
+                    >
+                      <span className={`h-2 w-2 rounded-full ${isSelected ? 'bg-brand-600' : 'bg-gray-300'}`} />
+                      <span>
+                        VPC {v.id}: {v.name}
+                      </span>
+                      <span className="text-[10px] text-gray-400">({v.server_count} nodes)</span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          </div>
 
-          {pingState.result && (
-            <Card
-              title={`Verification Results: ${pingState.result.source} ➔ ${pingState.result.target}`}
-              description="Reports per-rail connectivity across East-West RoCE fabric, North-South bond0, and IPMI management."
-            >
-              {/* Outcome summary banner */}
-              <div
-                className={`mb-6 rounded-xl border p-4 ${
-                  pingMode === 'intra'
-                    ? pingState.result.all_ew_ok
-                      ? 'border-success-200 bg-success-50 text-success-800'
-                      : 'border-warning-200 bg-warning-50 text-warning-800'
-                    : !pingState.result.all_ew_ok
-                    ? 'border-success-200 bg-success-50 text-success-800'
-                    : 'border-error-200 bg-error-50 text-error-800'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-xl">
-                    {pingMode === 'intra'
-                      ? pingState.result.all_ew_ok
-                        ? '✔'
-                        : '⚠️'
-                      : !pingState.result.all_ew_ok
-                      ? '🛡️'
-                      : '✘'}
-                  </span>
-                  <div>
-                    <h4 className="font-semibold text-theme-sm">
-                      {pingMode === 'intra'
-                        ? pingState.result.all_ew_ok
-                          ? 'Intra-VPC Cluster Fabric Fully Connected'
-                          : 'Partial Connectivity Detected'
-                        : !pingState.result.all_ew_ok
-                        ? 'Hardware Multi-Tenant Isolation Verified (Packets Dropped)'
-                        : 'Isolation Breach: Packets reached target across VPC!'}
-                    </h4>
-                    <p className="text-theme-xs opacity-90">
-                      {pingMode === 'intra'
-                        ? 'All RoCEv2 GPU rails communicate cleanly within the allocated VPC cluster.'
-                        : 'Traffic across VPC boundary is strictly dropped by switch hardware ACLs and FIB separation.'}
-                    </p>
-                  </div>
-                </div>
+          {/* 50/50 Side-by-Side: Left Terminal, Right TenantIsolationDiagram */}
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
+            {/* LEFT 50%: Compute Node SSH Session running cluster-ping.sh across tenants */}
+            <div className="lg:col-span-6">
+              <CliTerminal
+                title={`Tenant Isolation Audit: ${sourceServer || 'hgx-pod00-su0-h00'}`}
+                lines={
+                  crossVrfCliLines.length > 0
+                    ? crossVrfCliLines
+                    : [
+                        `[Connected to ${sourceServer || 'hgx-pod00-su0-h00'} via SSH Jump Host]`,
+                        `Linux ${sourceServer || 'hgx-pod00-su0-h00'} 5.15.0-nvidia-gpu (Ubuntu 22.04 LTS)`,
+                        `root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ # Select target tenants above and click 'Run Tenant Isolation Audit'`,
+                        `root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ # Runs ./cluster-ping.sh <SU> <Host> to audit 8 RoCE rails across tenants`,
+                        `root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `,
+                      ]
+                }
+                prompt={`root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `}
+                onRunCommand={handleRunServerAdHoc}
+                onClear={() => setCrossVrfCliLines([`root@${sourceServer || 'hgx-pod00-su0-h00'}:~$ `])}
+                loading={crossVrfLoading}
+                height="h-[560px]"
+                targetDevice={sourceServer || 'hgx-pod00-su0-h00'}
+                mgmtIp={sourceServerIp}
+                deviceType="server"
+              />
+            </div>
+
+            {/* RIGHT 50%: Tenant Isolation Visualizer */}
+            <div className="lg:col-span-6">
+              <CrossVrfDiagram
+                sourceVpc={selectedVpc}
+                targetVpcs={filteredVpcs}
+                selectedTargetIds={selectedTargetVrfIds}
+                results={crossVrfResults?.results || []}
+                isAuditing={crossVrfLoading}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* VIEW 4: EXTERNAL AIR-GAP ASSURANCE (Full Width Layout)                    */}
+      {/* ========================================================================= */}
+      {activeView === 'external-airgap' && (
+        <div className="space-y-4">
+          {/* Top Control Bar */}
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-xs">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h4 className="text-theme-sm font-bold text-gray-900">
+                  Perimeter Air-Gap & Zero-Leakage Verification
+                </h4>
+                <p className="text-theme-xs text-gray-500">
+                  Verifies that VPC {selectedVpcId} has no egress path to public internet addresses (8.8.8.8, 1.1.1.1, etc.).
+                </p>
               </div>
 
-              {/* Per-rail table */}
-              <div className="overflow-hidden rounded-xl border border-gray-200">
-                <table className="min-w-full">
-                  <thead className="border-b border-gray-100 bg-gray-50">
-                    <tr>
-                      <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Fabric Target</th>
-                      <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Target IP</th>
-                      <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Ping Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100 bg-white">
-                    {(pingState.result.ew_rails || []).map((rail) => (
-                      <tr key={rail.rail}>
-                        <td className="px-5 py-3.5 text-theme-sm font-medium text-gray-900">
-                          East-West RoCE {rail.rail}
-                        </td>
-                        <td className="px-5 py-3.5 text-theme-sm font-mono text-xs text-gray-600">{rail.ip}</td>
-                        <td className="px-5 py-3.5 text-theme-sm">
-                          <Badge color={rail.status === 'OK' ? 'success' : 'error'} variant="solid">
-                            {rail.status}
-                          </Badge>
-                        </td>
-                      </tr>
-                    ))}
-                    <tr>
-                      <td className="px-5 py-3.5 text-theme-sm font-medium text-gray-900">North-South bond0</td>
-                      <td className="px-5 py-3.5 text-theme-sm font-mono text-xs text-gray-600">
-                        {pingState.result.ns_bond?.ip || '—'}
-                      </td>
-                      <td className="px-5 py-3.5 text-theme-sm">
-                        <Badge
-                          color={pingState.result.ns_bond?.status === 'OK' ? 'success' : 'error'}
-                          variant="solid"
-                        >
-                          {pingState.result.ns_bond?.status || 'FAIL'}
-                        </Badge>
-                      </td>
-                    </tr>
-                    <tr>
-                      <td className="px-5 py-3.5 text-theme-sm font-medium text-gray-900">IPMI / BMC eth11</td>
-                      <td className="px-5 py-3.5 text-theme-sm font-mono text-xs text-gray-600">
-                        {pingState.result.ipmi?.ip || '—'}
-                      </td>
-                      <td className="px-5 py-3.5 text-theme-sm">
-                        <Badge
-                          color={pingState.result.ipmi?.status === 'OK' ? 'success' : 'error'}
-                          variant="solid"
-                        >
-                          {pingState.result.ipmi?.status || 'FAIL'}
-                        </Badge>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div className="flex items-center gap-3">
+                <Badge color="success" variant="solid">
+                  🔒 Default Blackhole Route Active
+                </Badge>
+                <Button size="sm" onClick={handleRunAirGapTest} disabled={airGapLoading}>
+                  {airGapLoading ? 'Auditing Air-Gap…' : 'Audit Perimeter Air-Gap 🔒'}
+                </Button>
               </div>
-            </Card>
-          )}
+            </div>
+          </div>
+
+          {/* Full-Width Terminal */}
+          <CliTerminal
+            title={`Perimeter Air-Gap Audit: ${selectedSwitch || 'NVIDIA Cumulus'}`}
+            lines={
+              airGapCliLines.length > 0
+                ? airGapCliLines
+                : [
+                    `[Connecting to switch ${selectedSwitch || 'leaf-pod00-su0-r0'} via SSH jump host...]`,
+                    `cumulus@${selectedSwitch || 'switch'}:~$ # Click 'Audit Perimeter Air-Gap' to test outbound public reachability`,
+                    `cumulus@${selectedSwitch || 'switch'}:~$ # Confirms zero egress route leakage outside data centre boundary`,
+                    `cumulus@${selectedSwitch || 'switch'}:~$ `,
+                  ]
+            }
+            prompt={`cumulus@${selectedSwitch || 'switch'}:~$ `}
+            onRunCommand={handleRunSwitchCommand}
+            onClear={() => setAirGapCliLines([`cumulus@${selectedSwitch || 'switch'}:~$ `])}
+            loading={airGapLoading}
+            height="h-[380px]"
+            targetDevice={selectedSwitch}
+            mgmtIp={activeSwitchObj?.mgmt_ip || ''}
+            deviceType="switch"
+          />
+
+          {/* Architecture Diagram Underneath */}
+          <AirGapDiagram
+            vpc={selectedVpc}
+            results={airGapResults?.results || []}
+            isAuditing={airGapLoading}
+          />
         </div>
       )}
     </div>

@@ -138,8 +138,16 @@ export function deleteSavedDiff(device, id) {
   })
 }
 
-export function getIsolationVpcs() {
-  return request('/api/isolation/vpcs')
+export function getIsolationVpcs(siteId) {
+  return request(`/api/isolation/vpcs${query({ site_id: siteId })}`)
+}
+
+export function postLaunchIterm(payload) {
+  return request('/api/terminal/launch-iterm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }
 
 export function getIsolationVpc(vpcId) {
@@ -161,3 +169,84 @@ export function postIsolationPing(source, targetSu, targetHost) {
     }),
   })
 }
+
+export function getIsolationSwitches(vpcId) {
+  return request(`/api/isolation/switches${query({ vpc_id: vpcId })}`)
+}
+
+export function getIsolationSwitchLogin(switchName, mgmtIp) {
+  return request(`/api/isolation/switch-login${query({ switch: switchName, mgmt_ip: mgmtIp })}`)
+}
+
+export function postIsolationSwitchExec(switchName, mgmtIp, command) {
+  return request('/api/isolation/switch-exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ switch: switchName, mgmt_ip: mgmtIp, command }),
+  })
+}
+
+export function postIsolationServerExec(serverName, command) {
+  return request('/api/isolation/server-exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ server: serverName, command }),
+  })
+}
+
+export function postIsolationPingCluster(sourceServer, vpcId) {
+  return request('/api/isolation/ping-cluster', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_server: sourceServer, vpc_id: vpcId }),
+  })
+}
+
+export function postIsolationPingCrossVrf(sourceVpcId, targetVpcIds, switchName, mgmtIp, sourceServer) {
+  return request('/api/isolation/ping-cross-vrf', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_vpc_id: sourceVpcId,
+      target_vpc_ids: targetVpcIds,
+      switch: switchName,
+      mgmt_ip: mgmtIp,
+      source_server: sourceServer,
+    }),
+  })
+}
+
+export function postIsolationPingExternal(sourceVpcId, targets, switchName, mgmtIp) {
+  return request('/api/isolation/ping-external', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source_vpc_id: sourceVpcId,
+      targets,
+      switch: switchName,
+      mgmt_ip: mgmtIp,
+    }),
+  })
+}
+
+
+export function getWatchEvents(since) {
+  return request(`/api/watch/events${query({ since })}`)
+}
+
+export function postWatchPoll(siteId, cursorEpoch, selectedDevices) {
+  return request('/api/watch/poll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      site_id: siteId,
+      cursor_epoch: cursorEpoch,
+      selected_devices: selectedDevices,
+    }),
+  })
+}
+
+export function getDeviceContext(deviceName) {
+  return request(`/api/devices/${encodeURIComponent(deviceName)}/context`)
+}
+

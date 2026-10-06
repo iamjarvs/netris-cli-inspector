@@ -8,6 +8,7 @@ export default function SiteSelect() {
     <Select
       label="Site"
       value={selectedSiteId ?? ''}
+      loading={sitesLoading}
       disabled={sitesLoading || sites.length === 0}
       onChange={(e) => setSelectedSiteId(Number(e.target.value))}
     >

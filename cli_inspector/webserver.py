@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,7 +19,15 @@ from flask import Flask, jsonify, request, send_from_directory
 from . import archive, catalog, diff_utils
 from .config import load_config
 from .executor import ExecutorError, SwitchExecutor, parse_config_history, parse_live_revision_ids
-from .inventory import Device, InventoryError, build_client, list_all_switches, list_sites
+from .inventory import (
+    Device,
+    InventoryError,
+    build_client,
+    get_relevant_write_logs,
+    list_all_switches,
+    list_sites,
+    summarize_api_log,
+)
 from .isolation import IsolationEngine
 from .menu import probe_site_reachable
 
@@ -34,7 +44,7 @@ executor = SwitchExecutor(
 )
 isolation_engine = IsolationEngine(client, executor)
 
-CACHE_TTL = 60
+CACHE_TTL = 300
 _inventory_cache: dict = {"devices": None, "sites": None, "at": 0.0}
 _reachability_cache: dict = {"by_site": {}, "at": {}}
 _lock = threading.Lock()
@@ -56,12 +66,31 @@ def _devices_for_site(devices: list[Device], site_id: int) -> list[Device]:
     return [d for d in devices if d.site_id == site_id]
 
 
+def _probe_site_reachable_fast(devices: list[Device], sample: int = 2, timeout: int = 3) -> bool:
+    valid = [d for d in devices if d.mgmt_address][:sample]
+    if not valid:
+        return False
+    with ThreadPoolExecutor(max_workers=min(len(valid), 4)) as pool:
+        futures = [
+            pool.submit(executor.exec_on_device, d.name, d.mgmt_address, "true", timeout=timeout)
+            for d in valid
+        ]
+        for f in as_completed(futures):
+            try:
+                res = f.result()
+                if res.ok:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 def _is_reachable(site_id: int, devices: list[Device]) -> bool:
     now = time.time()
     cached_at = _reachability_cache["at"].get(site_id, 0.0)
     if now - cached_at < CACHE_TTL:
         return _reachability_cache["by_site"][site_id]
-    reachable = probe_site_reachable(executor, devices) if devices else False
+    reachable = _probe_site_reachable_fast(devices) if devices else False
     _reachability_cache["by_site"][site_id] = reachable
     _reachability_cache["at"][site_id] = now
     return reachable
@@ -593,8 +622,9 @@ def delete_saved_diff_route(device, diff_id):
 
 @app.get("/api/isolation/vpcs")
 def get_isolation_vpcs():
+    site_id = request.args.get("site_id", type=int)
     try:
-        vpcs = isolation_engine.list_vpcs()
+        vpcs = isolation_engine.list_vpcs(site_id=site_id)
         return jsonify({"vpcs": vpcs})
     except Exception as e:
         raise ApiError(str(e), 500)
@@ -634,6 +664,367 @@ def post_isolation_ping():
         return jsonify(res)
     except Exception as e:
         raise ApiError(str(e), 500)
+
+
+@app.get("/api/isolation/switches")
+def get_isolation_switches():
+    vpc_id = request.args.get("vpc_id", default=31, type=int)
+    try:
+        switches = isolation_engine.list_switches_for_vpc(vpc_id)
+        return jsonify({"switches": switches})
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.get("/api/isolation/switch-login")
+def get_isolation_switch_login():
+    switch = request.args.get("switch")
+    mgmt_ip = request.args.get("mgmt_ip", "")
+    if not switch:
+        raise ApiError("switch parameter is required", 400)
+    try:
+        res = isolation_engine.get_switch_login_banner(switch, mgmt_ip)
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/isolation/switch-exec")
+def post_isolation_switch_exec():
+    body = request.get_json(force=True, silent=True) or {}
+    switch = body.get("switch")
+    mgmt_ip = body.get("mgmt_ip", "")
+    command = body.get("command")
+    if not switch or not command:
+        raise ApiError("switch and command are required", 400)
+    try:
+        res = isolation_engine.exec_switch_cli(switch, mgmt_ip, command)
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/isolation/server-exec")
+def post_isolation_server_exec():
+    body = request.get_json(force=True, silent=True) or {}
+    server = body.get("server")
+    command = body.get("command")
+    if not server or not command:
+        raise ApiError("server and command are required", 400)
+    try:
+        res = isolation_engine.exec_server_cli(server, command)
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/isolation/ping-cluster")
+def post_isolation_ping_cluster():
+    body = request.get_json(force=True, silent=True) or {}
+    source_server = body.get("source_server")
+    vpc_id = body.get("vpc_id", 31)
+    if not source_server:
+        raise ApiError("source_server is required", 400)
+    try:
+        res = isolation_engine.ping_all_cluster_hosts(source_server, int(vpc_id))
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/isolation/ping-cross-vrf")
+def post_isolation_ping_cross_vrf():
+    body = request.get_json(force=True, silent=True) or {}
+    source_vpc_id = body.get("source_vpc_id")
+    target_vpc_ids = body.get("target_vpc_ids") or []
+    source_server = body.get("source_server")
+    switch = body.get("switch")
+    mgmt_ip = body.get("mgmt_ip")
+    if not source_vpc_id or not target_vpc_ids:
+        raise ApiError("source_vpc_id and target_vpc_ids are required", 400)
+    try:
+        if source_server:
+            res = isolation_engine.ping_tenant_isolation(
+                source_server, int(source_vpc_id), [int(x) for x in target_vpc_ids]
+            )
+        else:
+            res = isolation_engine.ping_cross_vrfs(
+                int(source_vpc_id), [int(x) for x in target_vpc_ids], switch, mgmt_ip
+            )
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/isolation/ping-external")
+def post_isolation_ping_external():
+    body = request.get_json(force=True, silent=True) or {}
+    source_vpc_id = body.get("source_vpc_id")
+    targets = body.get("targets")
+    switch = body.get("switch")
+    mgmt_ip = body.get("mgmt_ip")
+    if not source_vpc_id:
+        raise ApiError("source_vpc_id is required", 400)
+    try:
+        res = isolation_engine.ping_external_ips(int(source_vpc_id), targets, switch, mgmt_ip)
+        return jsonify(res)
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+@app.post("/api/terminal/launch-iterm")
+def post_launch_iterm():
+    body = request.get_json(force=True, silent=True) or {}
+    target = (body.get("target") or "").strip()
+    ip = (body.get("ip") or "").strip()
+    device_type = (body.get("device_type") or "switch").strip().lower()
+    command = (body.get("command") or "").strip()
+
+    jump_host = cfg.get("ssh_jump_host", "adam-ctl.netris.io")
+    jump_user = cfg.get("ssh_jump_user", "ubuntu")
+    user = "root" if device_type in ("server", "host", "compute") else cfg.get("ssh_switch_user", "cumulus")
+
+    if not target and not ip:
+        raise ApiError("target name or IP is required", 400)
+
+    # Build the shell command to execute in the new iTerm window
+    if command:
+        inner_cmd = command
+    else:
+        inner_cmd = (
+            f"shopt -s expand_aliases; source ~/.cloudsim_aliases 2>/dev/null; source ~/.bashrc 2>/dev/null; "
+            f"if alias {target} &>/dev/null; then echo -e '\\033[1;32m==> Launching alias: {target}...\\033[0m'; {target}; "
+            f"elif [ -n \"{ip}\" ]; then echo -e '\\033[1;32m==> Connecting to {user}@{ip}...\\033[0m'; ssh -o StrictHostKeyChecking=no {user}@{ip}; "
+            f"else echo 'Device not found'; bash; fi"
+        )
+
+    ssh_cmd = f"ssh -t -o StrictHostKeyChecking=no -A {jump_user}@{jump_host} \"{inner_cmd}\""
+    escaped_cmd = ssh_cmd.replace("\\", "\\\\").replace('"', '\\"')
+
+    apple_script = f'''
+tell application "iTerm2"
+    activate
+    try
+        set newWindow to (create window with default profile)
+        tell current session of newWindow
+            write text "{escaped_cmd}"
+        end tell
+    on error
+        tell current window
+            create tab with default profile
+            tell current session
+                write text "{escaped_cmd}"
+            end tell
+        end tell
+    end try
+end tell
+'''
+
+    launched = False
+    warning = None
+    try:
+        sub = subprocess.run(["osascript", "-e", apple_script], capture_output=True, text=True, timeout=5)
+        if sub.returncode == 0:
+            launched = True
+        else:
+            warning = sub.stderr.strip() or "osascript returned non-zero"
+    except Exception as e:
+        warning = str(e)
+
+    return jsonify({
+        "ok": True,
+        "launched": launched,
+        "command": ssh_cmd,
+        "target": target,
+        "warning": warning,
+    })
+
+
+# -- Live Watch Mode Endpoints ------------------------------------------------
+
+@app.route("/api/watch/events", methods=["GET", "POST"])
+def get_watch_events():
+    since = request.args.get("since", default=None, type=int)
+    if since is None and request.is_json:
+        since = (request.get_json(silent=True) or {}).get("since")
+    if since is None:
+        since = int(time.time()) - 3600  # past hour
+    try:
+        raw_logs = get_relevant_write_logs(client, since)
+        summaries = [summarize_api_log(item) for item in raw_logs]
+        return jsonify({"events": summaries})
+    except Exception as e:
+        raise ApiError(str(e), 500)
+
+
+_last_switch_revs: dict[str, str] = {}
+
+
+@app.route("/api/devices/<device_name>/context")
+def api_device_context(device_name: str):
+    text = archive.latest_snapshot_text(cfg["archive_dir"], device_name)
+    if not text:
+        devices, _ = _refresh_inventory()
+        dev = next((d for d in devices if d.name == device_name), None)
+        if dev and dev.mgmt_address:
+            res = executor.get_full_config_commands(dev.name, dev.mgmt_address)
+            text = res.stdout if res.ok else ""
+    ctx = diff_utils.parse_device_context(text or "")
+    return jsonify({"device": device_name, "context": ctx})
+
+
+@app.route("/api/watch/poll", methods=["GET", "POST"])
+def post_watch_poll():
+    body = request.get_json(force=True, silent=True) or {}
+    site_id = body.get("site_id") if body.get("site_id") is not None else request.args.get("site_id", type=int)
+    cursor_epoch = body.get("cursor_epoch") if body.get("cursor_epoch") is not None else request.args.get("cursor_epoch", type=int)
+    now_epoch = int(time.time())
+
+    selected_devices = body.get("selected_devices")
+    if selected_devices is None and request.args.get("devices"):
+        selected_devices = [d.strip() for d in request.args.get("devices").split(",") if d.strip()]
+
+    if cursor_epoch is None or cursor_epoch <= 0:
+        cursor_epoch = now_epoch - 120
+
+    # 1. Fetch any new Netris API write logs
+    new_events = []
+    try:
+        raw_logs = get_relevant_write_logs(client, cursor_epoch, now_epoch)
+        for item in raw_logs:
+            new_events.append(summarize_api_log(item))
+    except Exception:
+        pass
+
+    # 2. Resolve target devices
+    devices, _sites = _refresh_inventory()
+    if site_id is not None:
+        target_devices = _devices_for_site(devices, site_id)
+    else:
+        target_devices = [d for d in devices if d.mgmt_address]
+
+    if selected_devices is not None and isinstance(selected_devices, (list, set)):
+        selected_set = set(selected_devices)
+        target_devices = [d for d in target_devices if d.name in selected_set]
+
+    valid_devices = [d for d in target_devices if d.mgmt_address]
+    pairs = [(d.name, d.mgmt_address) for d in valid_devices]
+
+    if not pairs:
+        return jsonify({
+            "ok": True,
+            "cursor_epoch": now_epoch,
+            "events": new_events,
+            "affected_devices": [],
+            "unchanged_devices": [],
+            "diffs": {},
+            "site_id": site_id,
+        })
+
+    archive.ensure_archive_repo(cfg["archive_dir"])
+
+    trigger_label = "watch: direct switch / manual change"
+    if new_events:
+        trigger_label = new_events[-1].get("summary", "Netris API Write")
+
+    affected_devices = []
+    unchanged_devices = []
+    diffs = {}
+
+    roles = {d.name: d.role for d in valid_devices}
+    mgmt_ips = {d.name: d.mgmt_address for d in valid_devices}
+
+    # 3. Lightweight Revision ID Sentinel check (Option A)
+    # Check current applied NVUE revision ID on each switch in parallel
+    rev_results = executor.exec_many(pairs, "nv config history | sed -n 3p | awk '{print $1}'", timeout=8)
+
+    # Determine which switches need a full config pull
+    switches_to_pull: list[tuple[str, str]] = []
+    for name, addr in pairs:
+        res = rev_results.get(name)
+        curr_rev = res.stdout.strip() if (res and res.ok) else None
+        prev_rev = _last_switch_revs.get(name)
+        has_snapshot = archive.latest_snapshot_text(cfg["archive_dir"], name) is not None
+
+        if not has_snapshot or (prev_rev and curr_rev and curr_rev != prev_rev):
+            switches_to_pull.append((name, addr))
+        elif not prev_rev and has_snapshot:
+            # Baseline exists in archive; record current rev so next check detects diffs
+            if curr_rev:
+                _last_switch_revs[name] = curr_rev
+            unchanged_devices.append(name)
+        else:
+            unchanged_devices.append(name)
+
+    # Pull full config only for changed or unseeded switches
+    if switches_to_pull:
+        exec_results = executor.get_full_config_commands_many(switches_to_pull)
+        for name, addr in switches_to_pull:
+            res = exec_results.get(name)
+            if not res or not res.ok:
+                continue
+
+            current_text = res.stdout
+            old_text = archive.latest_snapshot_text(cfg["archive_dir"], name)
+            curr_rev = rev_results.get(name).stdout.strip() if rev_results.get(name) and rev_results.get(name).ok else None
+            if curr_rev:
+                _last_switch_revs[name] = curr_rev
+
+            device_context = diff_utils.parse_device_context(current_text)
+
+            if old_text is None:
+                # Seed initial snapshot
+                meta = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "trigger": "watch-baseline",
+                    "site": str(site_id or "default"),
+                    "revision": curr_rev or "",
+                }
+                archive.snapshot_device(cfg["archive_dir"], name, current_text, meta)
+                unchanged_devices.append(name)
+                continue
+
+            if old_text.strip() == current_text.strip():
+                unchanged_devices.append(name)
+            else:
+                diff_res = diff_utils.parse_config_changes(name, old_text, current_text)
+                if diff_res.is_changed:
+                    affected_devices.append(name)
+                    # Snapshot to git archive
+                    meta = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "trigger": trigger_label,
+                        "site": str(site_id or "default"),
+                        "revision": curr_rev or "",
+                    }
+                    archive.snapshot_device(cfg["archive_dir"], name, current_text, meta)
+
+                    diffs[name] = {
+                        "device": name,
+                        "role": roles.get(name, "switch"),
+                        "mgmt_address": mgmt_ips.get(name, ""),
+                        "revision": curr_rev or "",
+                        "summary": diff_res.summary,
+                        "added_lines": diff_res.added_lines,
+                        "removed_lines": diff_res.removed_lines,
+                        "raw_diff": diff_res.raw_diff,
+                        "side_by_side": diff_utils.side_by_side(old_text, current_text),
+                        "context": device_context,
+                        "trigger": trigger_label,
+                    }
+                else:
+                    unchanged_devices.append(name)
+
+    return jsonify({
+        "ok": True,
+        "cursor_epoch": now_epoch,
+        "events": new_events,
+        "affected_devices": affected_devices,
+        "unchanged_devices": unchanged_devices,
+        "diffs": diffs,
+        "site_id": site_id,
+    })
+
 
 
 if __name__ == "__main__":

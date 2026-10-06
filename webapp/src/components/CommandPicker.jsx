@@ -12,6 +12,7 @@ export default function CommandPicker({ selectedId, onSelect }) {
       <Select
         label="Suggested commands"
         value={selectedId}
+        loading={loading}
         disabled={loading}
         onChange={(e) => {
           const entry = all.find((c) => c.id === e.target.value)

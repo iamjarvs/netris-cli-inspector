@@ -522,6 +522,9 @@ def flow_history(state: AppState):
                 ui.render_error(f"{name}: failed to fetch config ({clean_error_text(results[name].error or results[name].stderr)})")
             press_any_key()
 
+        elif choice == "watch":
+            flow_watch(state)
+
         elif choice == "save_diff":
             label = text("Label for this saved diff:")
             if label:
@@ -537,6 +540,39 @@ def flow_history(state: AppState):
             picked = pick_devices(state, "Pick a device to work with:")
             if picked:
                 device = picked[0]
+
+
+def flow_watch(state: AppState):
+    """Launches the real-time Watch Mode: continuously monitors Netris Controller
+    write calls and switch fabric configs, highlighting affected devices and showing
+    the exact new and removed configuration per switch.
+    """
+    from .watch_mode import WatchEngine
+
+    ui.print_banner(f"Watch Mode — {state.current_site.name}")
+    console.print(
+        f"[bold cyan]Starting Watch Mode for {state.current_site.name} ({len(state.site_devices)} devices)...[/bold cyan]\n"
+        "[dim]This continuously monitors for Netris Controller API write activity and switch config diffs,\n"
+        "showing which devices are affected and the added/removed configuration lines per switch.[/dim]\n"
+    )
+
+    poll_str = text("Poll interval in seconds (default: 10):", default="10")
+    try:
+        poll_interval = max(3, int((poll_str or "10").strip()))
+    except (ValueError, TypeError):
+        poll_interval = 10
+
+    engine = WatchEngine(
+        cfg=state.cfg,
+        client=state.client,
+        executor=state.executor,
+        site_name=state.current_site.name,
+        devices=state.site_devices,
+        poll_interval=poll_interval,
+        interactive=True,
+    )
+    engine.run()
+    press_any_key()
 
 
 def flow_revision_settings(state: AppState):
@@ -788,6 +824,7 @@ def main():
                     Choice("Compare two devices", value="compare"),
                     Choice("Config history & snapshots", value="history"),
                     Choice("Diff Examples (saved diffs)", value="diff_examples"),
+                    Choice("Watch mode (live config monitor & diff reviewer)", value="watch"),
                     Choice("Adjust revision retention (NVUE_MAX_REVISIONS)", value="retention"),
                     Choice("Switch isolation & assurance", value="isolation"),
                 ]
@@ -816,6 +853,8 @@ def main():
                 flow_history(state)
             elif choice == "diff_examples":
                 flow_diff_examples(state)
+            elif choice == "watch":
+                flow_watch(state)
             elif choice == "retention":
                 flow_revision_settings(state)
             elif choice == "isolation":

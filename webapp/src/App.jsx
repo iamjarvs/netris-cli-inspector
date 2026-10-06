@@ -9,6 +9,7 @@ import ExplorePage from './pages/ExplorePage'
 import HistoryPage from './pages/HistoryPage'
 import IsolationPage from './pages/IsolationPage'
 import RetentionPage from './pages/RetentionPage'
+import WatchPage from './pages/WatchPage'
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
             <Route path="/" element={<DevicesPage />} />
             <Route path="/explore" element={<ExplorePage />} />
             <Route path="/compare" element={<ComparePage />} />
+            <Route path="/watch" element={<WatchPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/diff-examples" element={<DiffExamplesPage />} />
             <Route path="/retention" element={<RetentionPage />} />

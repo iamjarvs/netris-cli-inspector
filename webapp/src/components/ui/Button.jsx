@@ -1,9 +1,11 @@
 const variantClasses = {
   primary: 'bg-brand-600 text-white shadow-theme-xs hover:bg-brand-700 disabled:bg-brand-300 disabled:cursor-not-allowed',
   outline: 'bg-white text-gray-700 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed',
+  secondary: 'bg-white text-gray-700 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed',
 }
 
 const sizeClasses = {
+  xs: 'px-2.5 py-1.5 text-theme-xs',
   sm: 'px-4 py-2 text-theme-sm',
   md: 'px-5 py-3 text-theme-sm',
 }
