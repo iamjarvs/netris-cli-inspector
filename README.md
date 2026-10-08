@@ -9,6 +9,10 @@ summary: "Production-grade interactive CLI and web dashboard for exploring physi
 updated: "2026-09-21"
 ---
 
+> **[WARNING] Demonstration Code Only**
+> This repository contains unsupported demonstration code for architectural illustration. It is a **possible implementation pattern**, not an official Netris product or supported tool. Use at your own risk.
+
+
 # Cumulus Switch CLI Inspector & Config History Suite
 
 A production-grade, interactive CLI utility and modern web dashboard engineered for **Solutions Architects, Network Engineers, and DevOps Operators** exploring and auditing NVIDIA Cumulus Linux switches operating behind the Netris Controller and jump host infrastructure.
@@ -27,6 +31,10 @@ In modern automated AI fabrics powered by Netris and NVIDIA Cumulus Linux (NVUE)
 - **Fabric Isolation & Assurance**: Live hardware table audits proving multi-tenant EVPN VNI separation and pure VRF FIB partitioning, backed by in-cluster ping tests.
 
 ---
+
+> **[WARNING] Demonstration Code Only**
+> This repository contains unsupported demonstration code for architectural illustration. It is a **possible implementation pattern**, not an official Netris product or supported tool. Use at your own risk.
+
 
 ## 2. Architecture & Data Flow
 
@@ -71,6 +79,10 @@ sequenceDiagram
   - Switches accessible from the jump host with key-based authentication.
 
 ---
+
+> **[WARNING] Demonstration Code Only**
+> This repository contains unsupported demonstration code for architectural illustration. It is a **possible implementation pattern**, not an official Netris product or supported tool. Use at your own risk.
+
 
 ## 4. Quickstart / How to Run
 
@@ -127,6 +139,10 @@ Configuration is managed via [`config.json`](file:///Users/adam/.gemini/antigrav
 This file is automatically synchronized with global credentials from the **Demo Command Center** (`demo-portal`).
 
 ---
+
+> **[WARNING] Demonstration Code Only**
+> This repository contains unsupported demonstration code for architectural illustration. It is a **possible implementation pattern**, not an official Netris product or supported tool. Use at your own risk.
+
 
 ## 6. Pre-Sales Demo Talk Tracks
 
