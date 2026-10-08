@@ -9,8 +9,8 @@ fi
 ./.venv/bin/pip install --quiet -r requirements.txt
 
 if [ ! -f config.json ]; then
-  echo "No config.json found. Copy config.example.json to config.json."
-  exit 1
+  echo "No config.json found. Copying config.example.json to config.json."
+  cp config.example.json config.json
 fi
 
 PORT="${PORT:-8743}"
