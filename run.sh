@@ -13,4 +13,5 @@ if [ ! -f config.json ]; then
   exit 1
 fi
 
-exec ./.venv/bin/python main.py
+export PYTHONPATH="$(pwd)/app"
+exec ./.venv/bin/python app/main.py

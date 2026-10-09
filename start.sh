@@ -15,4 +15,5 @@ fi
 
 PORT="${PORT:-8743}"
 echo "Starting CLI Inspector Web Server on http://localhost:${PORT}"
-exec ./.venv/bin/python webserver.py
+export PYTHONPATH="$(pwd)/app"
+exec ./.venv/bin/python app/webserver.py
