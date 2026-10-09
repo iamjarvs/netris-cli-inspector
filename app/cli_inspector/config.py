@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 
 DEFAULTS: Dict[str, Any] = {
     "netris_url": "https://adam-ctl.netris.io",
