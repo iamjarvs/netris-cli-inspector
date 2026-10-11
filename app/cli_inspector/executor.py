@@ -15,6 +15,8 @@ from typing import Optional
 
 import paramiko
 
+from .catalog import INTENT_COMMAND
+
 
 class ExecutorError(RuntimeError):
     pass
@@ -283,6 +285,13 @@ class SwitchExecutor:
 
     def get_full_config_json_many(self, targets: list[tuple[str, str]]) -> dict[str, ExecResult]:
         return self.exec_many(targets, "nv config show -r applied -o json")
+
+    def get_intent(self, device: str, mgmt_address: str) -> ExecResult:
+        """The Netris intent file as currently rendered on the switch."""
+        return self.exec_on_device(device, mgmt_address, INTENT_COMMAND)
+
+    def get_intent_many(self, targets: list[tuple[str, str]]) -> dict[str, ExecResult]:
+        return self.exec_many(targets, INTENT_COMMAND)
 
     def get_config_text_for_rev(self, device: str, mgmt_address: str, rev: str) -> ExecResult:
         return self.exec_on_device(device, mgmt_address, f"nv config show -r {shlex.quote(rev)} -o commands")

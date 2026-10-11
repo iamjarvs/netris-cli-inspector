@@ -14,6 +14,7 @@ import questionary
 from questionary import Choice, Separator, Style
 
 from . import archive, catalog, ui
+from .capture import capture_many
 from .config import CONFIG_PATH, config_is_complete, load_config
 from .diff_utils import clean_error_text, side_by_side, unified_diff
 from .executor import (
@@ -78,6 +79,17 @@ class AppState:
         self.current_site: Site | None = None
         self.site_devices: list[Device] = []
         self.last_diff: dict | None = None
+        # Which of the two things we capture from every switch the Explore /
+        # Compare / History views show: its applied "config", or the Netris
+        # "intent" that the controller pushed the agent to render it from.
+        self.kind: str = archive.KIND_CONFIG
+
+    @property
+    def kind_label(self) -> str:
+        return "Intent" if self.kind == archive.KIND_INTENT else "Configuration"
+
+    def toggle_kind(self):
+        self.kind = archive.KIND_CONFIG if self.kind == archive.KIND_INTENT else archive.KIND_INTENT
 
     def refresh_inventory(self):
         with console.status("[bold cyan]Loading inventory from Netris...[/bold cyan]", spinner="dots"):
@@ -201,11 +213,11 @@ def pick_command() -> str | None:
 
 def flow_explore(state: AppState):
     while True:
-        ui.print_banner(f"Explore — {state.current_site.name}")
+        ui.print_banner(f"Explore ({state.kind_label}) — {state.current_site.name}")
         targets = pick_target_group(state)
         if not targets:
             return
-        command = pick_command()
+        command = catalog.INTENT_COMMAND if state.kind == archive.KIND_INTENT else pick_command()
         if not command:
             continue
         pairs = [(d.name, d.mgmt_address) for d in targets]
@@ -219,7 +231,7 @@ def flow_explore(state: AppState):
 
 def flow_compare(state: AppState):
     while True:
-        ui.print_banner(f"Compare — {state.current_site.name}")
+        ui.print_banner(f"Compare ({state.kind_label}) — {state.current_site.name}")
         picked_a = pick_devices(state, "Pick the first device:")
         if not picked_a:
             return
@@ -228,7 +240,7 @@ def flow_compare(state: AppState):
         if not picked_b:
             continue
         device_b = picked_b[0]
-        command = pick_command()
+        command = catalog.INTENT_COMMAND if state.kind == archive.KIND_INTENT else pick_command()
         if not command:
             continue
         show_diff = confirm("Show a diff between the two outputs too?", default=True)
@@ -263,6 +275,7 @@ def flow_compare(state: AppState):
                 "diff_text": unified_diff(text_a, text_b, device_a.name, device_b.name),
                 "text_a": text_a,
                 "text_b": text_b,
+                "kind": state.kind,
             }
         press_any_key()
 
@@ -316,6 +329,14 @@ def _source_choices(state: AppState, device: Device, revisions, pruned_ids: set[
     `nv config history` still lists them) are hidden by default since
     picking one is guaranteed to fail with "Unknown revision".
     """
+    if state.kind == archive.KIND_INTENT:
+        # The switch keeps exactly one copy of intent (what it holds now), so
+        # every earlier version comes from the archive.
+        sources = [ConfigSource("live intent (current on switch)", "onbox", "live")]
+        for entry in archive.history(state.cfg["archive_dir"], device.name, kind=archive.KIND_INTENT):
+            sources.append(ConfigSource(f"archive {entry['commit'][:10]} — {ui.local_time(entry['date'])}", "archive", entry["commit"]))
+        return sources
+
     sources = []
     for rev in revisions:
         if rev.rev_id == "startup":
@@ -328,7 +349,7 @@ def _source_choices(state: AppState, device: Device, revisions, pruned_ids: set[
             label += "  [pruned]"
         sources.append(ConfigSource(label, "onbox", rev.rev_id))
     for entry in archive.history(state.cfg["archive_dir"], device.name):
-        sources.append(ConfigSource(f"archive {entry['commit'][:10]} — {entry['date']}", "archive", entry["commit"]))
+        sources.append(ConfigSource(f"archive {entry['commit'][:10]} — {ui.local_time(entry['date'])}", "archive", entry["commit"]))
     sources += [
         ConfigSource("applied (current)", "onbox", "applied"),
         ConfigSource("startup (current on-box)", "onbox", "startup"),
@@ -339,13 +360,16 @@ def _source_choices(state: AppState, device: Device, revisions, pruned_ids: set[
 
 def _fetch_source_text(state: AppState, device: Device, source: ConfigSource) -> str | None:
     if source.source_type == "onbox":
-        result = state.executor.get_config_text_for_rev(device.name, device.mgmt_address, source.ref)
+        if state.kind == archive.KIND_INTENT:
+            result = state.executor.get_intent(device.name, device.mgmt_address)
+        else:
+            result = state.executor.get_config_text_for_rev(device.name, device.mgmt_address, source.ref)
         if not result.ok:
             ui.render_error(clean_error_text(result.error or result.stderr))
             return None
         return result.stdout
     try:
-        return archive.show_at(state.cfg["archive_dir"], device.name, source.ref)
+        return archive.show_at(state.cfg["archive_dir"], device.name, source.ref, kind=state.kind)
     except archive.ArchiveError as e:
         ui.render_error(str(e))
         return None
@@ -371,8 +395,8 @@ def _show_diff(state: AppState, device: Device, source_a: ConfigSource, source_b
     view = select("View as:", [
         Choice("Diff (inline)", value="inline"),
         Choice("Diff (side-by-side)", value="side_by_side"),
-        Choice("Full config — side A", value="full_a"),
-        Choice("Full config — side B", value="full_b"),
+        Choice(f"Full {state.kind_label.lower()} — side A", value="full_a"),
+        Choice(f"Full {state.kind_label.lower()} — side B", value="full_b"),
         Choice("« Back", value=BACK),
     ])
     ui.print_banner(f"Config History — {state.current_site.name}")
@@ -393,6 +417,7 @@ def _show_diff(state: AppState, device: Device, source_a: ConfigSource, source_b
         "diff_text": diff_text,
         "text_a": text_a,
         "text_b": text_b,
+        "kind": state.kind,
     }
     press_any_key()
 
@@ -407,30 +432,50 @@ def flow_history(state: AppState):
     hide_pruned = True
 
     while True:
-        ui.print_banner(f"Config History — {device.name}")
-        with console.status("[bold cyan]Checking on-box revision history...[/bold cyan]", spinner="dots"):
-            revisions = _onbox_revisions(state, device)
-            live_ids = _live_revision_ids(state, device)
-        pruned_ids = _pruned_ids(revisions, live_ids)
-        table_revisions = [r for r in revisions if not (hide_startup and r.rev_id == "startup")]
-        if hide_pruned and pruned_ids is not None:
-            table_revisions = [r for r in table_revisions if r.rev_id not in pruned_ids]
-        ui.render_config_revisions(device.name, table_revisions, pruned_ids=None if hide_pruned else pruned_ids)
-        if pruned_ids is None:
-            console.print("[dim]Could not determine which revisions are pruned on this device.[/dim]")
-        elif hide_pruned and pruned_ids:
-            console.print(f"[dim]{len(pruned_ids)} pruned revision(s) hidden.[/dim]")
+        is_intent = state.kind == archive.KIND_INTENT
+        ui.print_banner(f"{'Intent' if is_intent else 'Config'} History — {device.name}")
+        revisions, pruned_ids = [], None
+        if is_intent:
+            # Intent has no on-box revision list: the switch overwrites the
+            # one file each render. The archive is its whole history.
+            entries = archive.history(state.cfg["archive_dir"], device.name, kind=archive.KIND_INTENT)
+            ui.render_archive_history(device.name, entries, title="Intent archive history")
+            if not entries:
+                console.print("[dim]No intent captured yet -- take a snapshot, or run the watcher.[/dim]")
+        else:
+            with console.status("[bold cyan]Checking on-box revision history...[/bold cyan]", spinner="dots"):
+                revisions = _onbox_revisions(state, device)
+                live_ids = _live_revision_ids(state, device)
+            pruned_ids = _pruned_ids(revisions, live_ids)
+            table_revisions = [r for r in revisions if not (hide_startup and r.rev_id == "startup")]
+            if hide_pruned and pruned_ids is not None:
+                table_revisions = [r for r in table_revisions if r.rev_id not in pruned_ids]
+            ui.render_config_revisions(device.name, table_revisions, pruned_ids=None if hide_pruned else pruned_ids)
+            if pruned_ids is None:
+                console.print("[dim]Could not determine which revisions are pruned on this device.[/dim]")
+            elif hide_pruned and pruned_ids:
+                console.print(f"[dim]{len(pruned_ids)} pruned revision(s) hidden.[/dim]")
 
+        other_label = "Configuration" if is_intent else "Intent"
         choices = [
+            Choice(f"Viewing: {state.kind_label}  —  switch to {other_label}", value="toggle_kind"),
             Choice("Refresh", value="refresh"),
-            Choice(f"{'Show' if hide_startup else 'Hide'} startup entries in the table above", value="toggle_startup"),
-            Choice(f"{'Show' if hide_pruned else 'Hide'} pruned revisions in the table above", value="toggle_pruned"),
-            Choice("Compare current vs a revision (pick from the table)", value="vs_current"),
-            Choice("Compare two sources (any revision or archive snapshot)", value="two_way"),
-            Choice("View full config (no diff)", value="view_full"),
-            Choice("View archive snapshot history", value="hist"),
-            Choice("Snapshot this device now", value="snap_one"),
-            Choice(f"Snapshot ALL devices in {state.current_site.name} now", value="snap_all"),
+        ]
+        if not is_intent:
+            choices += [
+                Choice(f"{'Show' if hide_startup else 'Hide'} startup entries in the table above", value="toggle_startup"),
+                Choice(f"{'Show' if hide_pruned else 'Hide'} pruned revisions in the table above", value="toggle_pruned"),
+            ]
+        choices += [
+            Choice(f"Compare current vs {'an archived snapshot' if is_intent else 'a revision (pick from the table)'}", value="vs_current"),
+            Choice("Compare two sources" + (" (live or archive snapshot)" if is_intent else " (any revision or archive snapshot)"), value="two_way"),
+            Choice(f"View full {state.kind_label.lower()} (no diff)", value="view_full"),
+        ]
+        if not is_intent:
+            choices.append(Choice("View archive snapshot history", value="hist"))
+        choices += [
+            Choice("Snapshot this device now (config + intent)", value="snap_one"),
+            Choice(f"Snapshot ALL devices in {state.current_site.name} now (config + intent)", value="snap_all"),
         ]
         if state.last_diff:
             choices.append(Choice("Save last diff...", value="save_diff"))
@@ -439,9 +484,14 @@ def flow_history(state: AppState):
             Separator("─────────────"),
             Choice("« Back", value=BACK),
         ]
-        choice = select("Config history & snapshots:", choices)
+        choice = select(f"{state.kind_label} history & snapshots:", choices)
         if choice in (BACK, None):
             return
+
+        if choice == "toggle_kind":
+            state.toggle_kind()
+            state.last_diff = None
+            continue
 
         if choice == "refresh":
             continue
@@ -454,15 +504,21 @@ def flow_history(state: AppState):
 
         elif choice == "vs_current":
             sources = _source_choices(state, device, revisions, pruned_ids, hide_pruned)
-            non_current = [s for s in sources if s.ref != "applied"]
-            other_source = _pick_source(non_current, "Compare current (applied) against:")
+            current_ref = "live" if state.kind == archive.KIND_INTENT else "applied"
+            non_current = [s for s in sources if s.ref != current_ref]
+            other_source = _pick_source(non_current, f"Compare current ({'live intent' if state.kind == archive.KIND_INTENT else 'applied'}) against:")
             if other_source:
                 # other_source is the "from" side (A) and current/applied is the
                 # "to" side (B) -- so the diff reads the intuitive way: red/removed
                 # is what that other source had and current doesn't anymore, green/
                 # added is what's newly there since then. Passing current as A (as
                 # this used to) inverts that for every historical-vs-current compare.
-                _show_diff(state, device, other_source, ConfigSource("applied (current)", "onbox", "applied"),
+                current = (
+                    ConfigSource("live intent (current on switch)", "onbox", "live")
+                    if state.kind == archive.KIND_INTENT
+                    else ConfigSource("applied (current)", "onbox", "applied")
+                )
+                _show_diff(state, device, other_source, current,
                            title=f"{device.name}: current vs {other_source.label}")
 
         elif choice == "two_way":
@@ -491,35 +547,21 @@ def flow_history(state: AppState):
             press_any_key()
 
         elif choice == "snap_one":
-            with console.status(f"[bold cyan]Pulling full config from {device.name}...[/bold cyan]"):
-                result = state.executor.get_full_config_commands(device.name, device.mgmt_address)
-                json_result = state.executor.get_full_config_json(device.name, device.mgmt_address)
-            if not result.ok:
-                ui.render_error(clean_error_text(result.error or result.stderr))
-            else:
-                config_json = None
-                if json_result.ok:
-                    try:
-                        parsed = json.loads(json_result.stdout)
-                        config_json = parsed[1]["set"] if isinstance(parsed, list) and len(parsed) > 1 else parsed
-                    except (json.JSONDecodeError, TypeError, KeyError, IndexError):
-                        config_json = None
-                committed = archive.snapshot_device(
-                    state.cfg["archive_dir"], device.name, result.stdout, _snapshot_meta(state), config_json=config_json
+            with console.status(f"[bold cyan]Capturing config + intent from {device.name}...[/bold cyan]"):
+                captured = capture_many(
+                    state.executor, state.cfg["archive_dir"], [(device.name, device.mgmt_address)],
+                    "manual", site=state.current_site.name,
                 )
-                ui.render_snapshot_result(device.name, committed)
+            ui.render_capture_summary(captured)
             press_any_key()
 
         elif choice == "snap_all":
             pairs = [(d.name, d.mgmt_address) for d in state.site_devices]
-            with console.status(f"[bold cyan]Pulling full config from {len(pairs)} device(s)...[/bold cyan]"):
-                results = state.executor.get_full_config_commands_many(pairs)
-            configs = {name: r.stdout for name, r in results.items() if r.ok}
-            failed = [name for name, r in results.items() if not r.ok]
-            snap_results = archive.snapshot_many(state.cfg["archive_dir"], configs, _snapshot_meta(state))
-            ui.render_snapshot_summary(snap_results)
-            for name in failed:
-                ui.render_error(f"{name}: failed to fetch config ({clean_error_text(results[name].error or results[name].stderr)})")
+            with console.status(f"[bold cyan]Capturing config + intent from {len(pairs)} device(s)...[/bold cyan]"):
+                captured = capture_many(
+                    state.executor, state.cfg["archive_dir"], pairs, "manual", site=state.current_site.name
+                )
+            ui.render_capture_summary(captured)
             press_any_key()
 
         elif choice == "watch":
@@ -532,6 +574,7 @@ def flow_history(state: AppState):
                     state.cfg["archive_dir"], state.last_diff["device"], label,
                     state.last_diff["source_a_desc"], state.last_diff["source_b_desc"],
                     state.last_diff["diff_text"], state.last_diff["text_a"], state.last_diff["text_b"],
+                    kind=state.last_diff.get("kind", archive.KIND_CONFIG),
                 )
                 console.print(f"[green]Saved as {diff_id}[/green]")
                 press_any_key()
@@ -819,7 +862,9 @@ def main():
                 Choice("Pick a site" + (f"  (current: {state.current_site.name})" if state.current_site else ""), value="site"),
             ]
             if state.current_site:
+                other = "Configuration" if state.kind == archive.KIND_INTENT else "Intent"
                 choices += [
+                    Choice(f"View: {state.kind_label}  —  switch to {other}", value="toggle_kind"),
                     Choice("Explore / run show commands", value="explore"),
                     Choice("Compare two devices", value="compare"),
                     Choice("Config history & snapshots", value="history"),
@@ -845,7 +890,10 @@ def main():
                 continue
             if not state.current_site:
                 continue
-            if choice == "explore":
+            if choice == "toggle_kind":
+                state.toggle_kind()
+                state.last_diff = None
+            elif choice == "explore":
                 flow_explore(state)
             elif choice == "compare":
                 flow_compare(state)

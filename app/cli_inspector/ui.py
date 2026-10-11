@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
+from datetime import datetime
 from typing import Optional
 
 from rich import box
@@ -18,6 +20,31 @@ from .diff_utils import DeviceDiffResult, dumps_relaxed
 from rich.text import Text
 
 console = Console()
+
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?")
+
+
+def local_time(iso: str) -> str:
+    """Switches run in their own time zone and archive subjects are UTC, so
+    show everything in this machine's local time, with the zone named."""
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return iso
+    if parsed.tzinfo is None:
+        return iso
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def short_subject(subject: str) -> str:
+    """Drops the trailing " @ <timestamp>" from an archive commit subject --
+    the capture time already has its own (local-time) column."""
+    return re.sub(r" @ \S+$", "", subject)
+
+
+def localize_text(text: str) -> str:
+    return _ISO_RE.sub(lambda m: local_time(m.group(0)), text)
+
 
 
 def print_banner(subtitle: Optional[str] = None, clear: bool = True) -> None:
@@ -133,30 +160,30 @@ def render_diff_text(diff_text: str, title: str = "Diff") -> None:
 def render_config_revisions(device: str, revisions, limit: int = 15, pruned_ids: set[str] | None = None) -> None:
     table = Table(title=f"On-box NVUE revision history: {device}", box=box.ROUNDED)
     table.add_column("Rev ID", style="cyan")
-    table.add_column("Apply Date", style="white")
+    table.add_column("Apply Date (local)", style="white")
     table.add_column("Type", style="magenta")
     table.add_column("User", style="yellow")
     table.add_column("Message", style="dim")
     if pruned_ids is not None:
         table.add_column("Status", style="white")
     for rev in revisions[:limit]:
-        row = [rev.rev_id, rev.apply_date, rev.rev_type, rev.user, rev.message]
+        row = [rev.rev_id, local_time(rev.apply_date), rev.rev_type, rev.user, rev.message]
         if pruned_ids is not None:
             row.append("[red]pruned[/red]" if rev.rev_id in pruned_ids else "[green]live[/green]")
         table.add_row(*row)
     console.print(table)
 
 
-def render_archive_history(device: str, entries) -> None:
-    table = Table(title=f"Archive snapshot history: {device}", box=box.ROUNDED)
+def render_archive_history(device: str, entries, title: str = "Archive snapshot history") -> None:
+    table = Table(title=f"{title}: {device}", box=box.ROUNDED)
     table.add_column("Commit", style="cyan", no_wrap=True)
-    table.add_column("Date", style="white")
+    table.add_column("Date (local)", style="white")
     table.add_column("Subject", style="yellow")
     if not entries:
         console.print(Panel(f"[dim]No archive snapshots yet for {device}.[/dim]", border_style="dim"))
         return
     for entry in entries:
-        table.add_row(entry["commit"][:10], entry["date"], entry["subject"])
+        table.add_row(entry["commit"][:10], local_time(entry["date"]), short_subject(entry["subject"]))
     console.print(table)
 
 
@@ -264,6 +291,21 @@ def render_revision_apply_results(results: dict) -> None:
         )
     console.print(table)
     console.print(f"\n[bold]{ok_count}[/bold] / {len(results)} succeeded.")
+
+
+def render_capture_summary(results: dict) -> None:
+    """results: device -> capture.CaptureResult"""
+    for name, r in sorted(results.items()):
+        if r.failed:
+            console.print(f"[bold red]✘[/bold red] {name}: capture failed ({r.error})")
+            continue
+        changed = [label for label, did in (("config", r.config_changed), ("intent", r.intent_changed)) if did]
+        if changed:
+            console.print(f"[bold green]✔[/bold green] {name}: {' + '.join(changed)} changed -- committed.")
+        else:
+            console.print(f"[dim]· {name}: no change since last snapshot.[/dim]")
+        if r.error:
+            console.print(f"  [yellow]partial: {r.error}[/yellow]")
 
 
 def render_snapshot_summary(results: dict) -> None:

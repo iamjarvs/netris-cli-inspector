@@ -6,6 +6,8 @@ CORS handling is needed here).
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
 import threading
@@ -17,6 +19,7 @@ from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory
 
 from . import archive, catalog, diff_utils
+from .capture import SENTINEL_COMMAND, capture_many, parse_sentinel, sync_intent
 from .config import load_config
 from .executor import ExecutorError, SwitchExecutor, parse_config_history, parse_live_revision_ids
 from .inventory import (
@@ -144,15 +147,62 @@ def _unwrap_config_json(parsed):
     return parsed
 
 
+def _kind_arg() -> str:
+    kind = request.args.get("kind", archive.KIND_CONFIG)
+    if kind not in (archive.KIND_CONFIG, archive.KIND_INTENT):
+        raise ApiError("kind must be 'config' or 'intent'")
+    return kind
+
+
+_yaml_tree_cache: dict[str, dict] = {}
+
+
+def _intent_to_tree(text: str) -> dict:
+    """Parses the intent YAML ([{set: {tree}}]) into the same nested-dict shape
+    the configuration JSON tree uses, so the dashboard can fold it identically.
+    Cached by content hash -- the file is ~150 KB and slow to parse.
+    """
+    import hashlib
+
+    import yaml
+
+    key = hashlib.sha256(text.encode()).hexdigest()
+    if key in _yaml_tree_cache:
+        return _yaml_tree_cache[key]
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+    try:
+        parsed = yaml.load(text, Loader=loader)
+    except yaml.YAMLError as e:
+        raise ApiError(f"intent file is not valid YAML: {e}", 502)
+    if isinstance(parsed, list):
+        merged: dict = {}
+        for doc in parsed:
+            if isinstance(doc, dict) and isinstance(doc.get("set"), dict):
+                merged.update(doc["set"])
+        parsed = merged
+    if len(_yaml_tree_cache) > 8:
+        _yaml_tree_cache.clear()
+    _yaml_tree_cache[key] = parsed
+    return parsed
+
+
 def _catalog_entry_dict(entry: catalog.CatalogEntry) -> dict:
     return {"id": entry.id, "label": entry.label, "command": entry.command, "source": entry.source}
 
 
-def _fetch_config_text(device: str, mgmt_address: Optional[str], source_type: str, ref: str) -> str:
+def _fetch_config_text(
+    device: str, mgmt_address: Optional[str], source_type: str, ref: str, kind: str = archive.KIND_CONFIG
+) -> str:
     if source_type == "onbox":
         if not mgmt_address:
             raise ApiError("mgmt_address is required for source_type=onbox")
-        result = executor.get_config_text_for_rev(device, mgmt_address, ref)
+        if kind == archive.KIND_INTENT:
+            # The switch keeps exactly one copy of intent: what's on it now.
+            if ref != "live":
+                raise ApiError("the switch only holds the current intent; use ref=live or an archive snapshot")
+            result = executor.get_intent(device, mgmt_address)
+        else:
+            result = executor.get_config_text_for_rev(device, mgmt_address, ref)
         if not result.ok:
             raise ApiError(diff_utils.clean_error_text(result.error or result.stderr) or f"failed to fetch config from {device}", 502)
         return result.stdout
@@ -160,11 +210,11 @@ def _fetch_config_text(device: str, mgmt_address: Optional[str], source_type: st
     if source_type == "archive":
         try:
             if ref == "latest":
-                text = archive.latest_snapshot_text(cfg["archive_dir"], device)
+                text = archive.latest_snapshot_text(cfg["archive_dir"], device, kind)
                 if text is None:
-                    raise ApiError(f"no archived snapshot for {device}", 404)
+                    raise ApiError(f"no archived {kind} snapshot for {device}", 404)
                 return text
-            return archive.show_at(cfg["archive_dir"], device, ref)
+            return archive.show_at(cfg["archive_dir"], device, ref, kind)
         except archive.ArchiveError as e:
             raise ApiError(str(e), 404)
 
@@ -244,6 +294,7 @@ def get_catalog():
         {
             "config": [_catalog_entry_dict(e) for e in catalog.CONFIG_COMMANDS],
             "show": [_catalog_entry_dict(e) for e in catalog.SHOW_COMMANDS],
+            "intent": _catalog_entry_dict(catalog.INTENT_ENTRY),
         }
     )
 
@@ -362,7 +413,7 @@ def get_history_archive():
     if not device:
         raise ApiError("device is required")
     limit = request.args.get("limit", default=20, type=int)
-    entries = archive.history(cfg["archive_dir"], device, limit=limit)
+    entries = archive.history(cfg["archive_dir"], device, limit=limit, kind=_kind_arg())
     return jsonify({"entries": entries})
 
 
@@ -381,19 +432,16 @@ def post_archive_snapshot():
             raise ApiError(f"unknown device or missing mgmt_address: {name}")
         pairs.append((name, mgmt_address))
 
-    archive.ensure_archive_repo(cfg["archive_dir"])
-    exec_results = executor.get_full_config_commands_many(pairs)
-    configs = {name: r.stdout for name, r in exec_results.items() if r.ok}
-    failed = [name for name, r in exec_results.items() if not r.ok]
-
-    meta = {"timestamp": datetime.now(timezone.utc).isoformat(), "trigger": "web-ui"}
-    snap_results = archive.snapshot_many(cfg["archive_dir"], configs, meta)
-
-    results = dict(snap_results)
-    for name in failed:
-        results[name] = False
-
-    return jsonify({"results": results, "failed": failed})
+    captured = capture_many(executor, cfg["archive_dir"], pairs, "web-ui")
+    return jsonify(
+        {
+            # Kept for older callers: did the *configuration* change?
+            "results": {name: r.config_changed for name, r in captured.items()},
+            "intent_results": {name: r.intent_changed for name, r in captured.items()},
+            "failed": [name for name, r in captured.items() if r.failed],
+            "errors": {name: r.error for name, r in captured.items() if r.error},
+        }
+    )
 
 
 @app.get("/api/archive/diff")
@@ -404,7 +452,7 @@ def get_archive_diff():
     rev_a = request.args.get("rev_a")
     rev_b = request.args.get("rev_b")
     try:
-        diff_text = archive.diff(cfg["archive_dir"], device, rev_a, rev_b)
+        diff_text = archive.diff(cfg["archive_dir"], device, rev_a, rev_b, kind=_kind_arg())
     except archive.ArchiveError as e:
         raise ApiError(str(e), 404)
     return jsonify({"diff": diff_text})
@@ -417,7 +465,7 @@ def get_archive_show():
     if not device or not rev:
         raise ApiError("device and rev are required")
     try:
-        content = archive.show_at(cfg["archive_dir"], device, rev)
+        content = archive.show_at(cfg["archive_dir"], device, rev, kind=_kind_arg())
     except archive.ArchiveError as e:
         raise ApiError(str(e), 404)
     return jsonify({"content": content})
@@ -458,6 +506,14 @@ def get_config_source():
         raise ApiError("device, source_type, and ref are required")
     if fmt not in ("text", "json"):
         raise ApiError("format must be 'text' or 'json'")
+    kind = _kind_arg()
+
+    if kind == archive.KIND_INTENT:
+        text = _fetch_config_text(device, mgmt_address, source_type, ref, kind)
+        if fmt == "text":
+            return jsonify({"text": text})
+        tree = _intent_to_tree(text)
+        return jsonify({"json": tree, "pretty": diff_utils.dumps_relaxed(tree)})
 
     if fmt == "text":
         return jsonify({"text": _fetch_config_text(device, mgmt_address, source_type, ref)})
@@ -503,8 +559,9 @@ def get_config_diff_route():
     if not device or not a_type or not a_ref or not b_type or not b_ref:
         raise ApiError("device, a_type, a_ref, b_type, and b_ref are required")
 
-    text_a = _fetch_config_text(device, mgmt_address, a_type, a_ref)
-    text_b = _fetch_config_text(device, mgmt_address, b_type, b_ref)
+    kind = _kind_arg()
+    text_a = _fetch_config_text(device, mgmt_address, a_type, a_ref, kind)
+    text_b = _fetch_config_text(device, mgmt_address, b_type, b_ref, kind)
     name_a = f"{a_type}:{a_ref}"
     name_b = f"{b_type}:{b_ref}"
     return jsonify(
@@ -584,11 +641,12 @@ def post_saved_diff():
     diff_text = body.get("diff")
     text_a = body.get("text_a", "")
     text_b = body.get("text_b", "")
+    kind = body.get("kind", archive.KIND_CONFIG)
     if not device or not label or not source_a_desc or not source_b_desc or diff_text is None:
         raise ApiError("device, label, source_a_desc, source_b_desc, and diff are required")
 
     diff_id = archive.save_diff(
-        cfg["archive_dir"], device, label, source_a_desc, source_b_desc, diff_text, text_a, text_b
+        cfg["archive_dir"], device, label, source_a_desc, source_b_desc, diff_text, text_a, text_b, kind
     )
     return jsonify({"id": diff_id})
 
@@ -772,13 +830,27 @@ def post_isolation_ping_external():
         raise ApiError(str(e), 500)
 
 
+_SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SAFE_IP_RE = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$")
+
+
+def _is_local_origin(origin: str) -> bool:
+    return bool(re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin or ""))
+
+
 @app.post("/api/terminal/launch-iterm")
 def post_launch_iterm():
+    # This opens a terminal on the machine running the server, so refuse any
+    # browser request that didn't come from this app itself (a random web page
+    # can otherwise POST here -- the body is parsed whatever the content type).
+    origin = request.headers.get("Origin")
+    if origin is not None and not _is_local_origin(origin):
+        raise ApiError("cross-origin requests are not allowed", 403)
+
     body = request.get_json(force=True, silent=True) or {}
     target = (body.get("target") or "").strip()
     ip = (body.get("ip") or "").strip()
     device_type = (body.get("device_type") or "switch").strip().lower()
-    command = (body.get("command") or "").strip()
 
     jump_host = cfg.get("ssh_jump_host", "adam-ctl.netris.io")
     jump_user = cfg.get("ssh_jump_user", "ubuntu")
@@ -786,17 +858,20 @@ def post_launch_iterm():
 
     if not target and not ip:
         raise ApiError("target name or IP is required", 400)
+    # target and ip are interpolated into a shell command, so only plain
+    # hostnames / dotted-quad IPs are accepted.
+    if target and not _SAFE_TARGET_RE.match(target):
+        raise ApiError("target must be a plain device name", 400)
+    if ip and not _SAFE_IP_RE.match(ip):
+        raise ApiError("ip must be a dotted-quad IPv4 address", 400)
 
     # Build the shell command to execute in the new iTerm window
-    if command:
-        inner_cmd = command
-    else:
-        inner_cmd = (
-            f"shopt -s expand_aliases; source ~/.cloudsim_aliases 2>/dev/null; source ~/.bashrc 2>/dev/null; "
-            f"if alias {target} &>/dev/null; then echo -e '\\033[1;32m==> Launching alias: {target}...\\033[0m'; {target}; "
-            f"elif [ -n \"{ip}\" ]; then echo -e '\\033[1;32m==> Connecting to {user}@{ip}...\\033[0m'; ssh -o StrictHostKeyChecking=no {user}@{ip}; "
-            f"else echo 'Device not found'; bash; fi"
-        )
+    inner_cmd = (
+        f"shopt -s expand_aliases; source ~/.cloudsim_aliases 2>/dev/null; source ~/.bashrc 2>/dev/null; "
+        f"if alias {target} &>/dev/null; then echo -e '\\033[1;32m==> Launching alias: {target}...\\033[0m'; {target}; "
+        f"elif [ -n \"{ip}\" ]; then echo -e '\\033[1;32m==> Connecting to {user}@{ip}...\\033[0m'; ssh -o StrictHostKeyChecking=no {user}@{ip}; "
+        f"else echo 'Device not found'; bash; fi"
+    )
 
     ssh_cmd = f"ssh -t -o StrictHostKeyChecking=no -A {jump_user}@{jump_host} \"{inner_cmd}\""
     escaped_cmd = ssh_cmd.replace("\\", "\\\\").replace('"', '\\"')
@@ -936,13 +1011,27 @@ def post_watch_poll():
 
     # 3. Lightweight Revision ID Sentinel check (Option A)
     # Check current applied NVUE revision ID on each switch in parallel
-    rev_results = executor.exec_many(pairs, "nv config history | sed -n 3p | awk '{print $1}'", timeout=8)
+    # The same call hashes each switch's Netris intent file, so a change to the
+    # intent is archived even when the NVUE revision hasn't moved.
+    rev_results = executor.exec_many(pairs, SENTINEL_COMMAND, timeout=8)
+    sentinel = {
+        name: parse_sentinel(res.stdout) if res and res.ok else (None, None)
+        for name, res in rev_results.items()
+    }
+    intent_updates = sync_intent(
+        executor,
+        cfg["archive_dir"],
+        pairs,
+        {n: sha for n, (_rev, sha) in sentinel.items()},
+        trigger="watch: intent changed",
+        site=str(site_id or "default"),
+        revisions={n: rev for n, (rev, _sha) in sentinel.items()},
+    )
 
     # Determine which switches need a full config pull
     switches_to_pull: list[tuple[str, str]] = []
     for name, addr in pairs:
-        res = rev_results.get(name)
-        curr_rev = res.stdout.strip() if (res and res.ok) else None
+        curr_rev = sentinel.get(name, (None, None))[0]
         prev_rev = _last_switch_revs.get(name)
         has_snapshot = archive.latest_snapshot_text(cfg["archive_dir"], name) is not None
 
@@ -966,7 +1055,7 @@ def post_watch_poll():
 
             current_text = res.stdout
             old_text = archive.latest_snapshot_text(cfg["archive_dir"], name)
-            curr_rev = rev_results.get(name).stdout.strip() if rev_results.get(name) and rev_results.get(name).ok else None
+            curr_rev = sentinel.get(name, (None, None))[0]
             if curr_rev:
                 _last_switch_revs[name] = curr_rev
 
@@ -1022,13 +1111,12 @@ def post_watch_poll():
         "affected_devices": affected_devices,
         "unchanged_devices": unchanged_devices,
         "diffs": diffs,
+        "intent_changed": sorted(n for n, committed in intent_updates.items() if committed),
         "site_id": site_id,
     })
 
 
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("PORT", 8743))
     app.run(host="0.0.0.0", port=port, debug=False)
-

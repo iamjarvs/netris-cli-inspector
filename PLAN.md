@@ -331,6 +331,37 @@ history` can legitimately list `"startup"` as a rev_id more than once.
   (`~/.cli-inspector/archive` by default) — a real one already exists there
   from this session's testing, seeded with all 18 Datacenter-A switches.
 
+## Netris intent capture (added 2026-10-11)
+Alongside the applied *configuration*, every capture now also stores the
+Netris **intent**: `/opt/netris/etc/nvue/00-netris.yaml`, the NVUE YAML that
+the on-switch agent (`vxpd-nvue`, every ~30 s) renders from what the
+controller pushed it. The switch overwrites that file on each render and
+keeps no history, so the archive is the only record. It's world-readable
+(no sudo) and ~150 KB per leaf.
+- **Storage**: `<device>.intent.yaml` in the same git archive as
+  `<device>.commands`/`.json`, committed on its own so `git log -- <file>` is
+  a clean per-kind history. `cli_inspector/capture.py` is the single capture
+  path (CLI, web, watcher), pulling config + intent together.
+- **Watch mode** (CLI `WatchEngine` and the web Watch page's `/api/watch/poll`):
+  the existing per-switch revision sentinel now also hashes the intent file in
+  the same SSH call (`capture.SENTINEL_COMMAND`). `capture.sync_intent()`
+  archives a switch's intent whenever its live hash differs from the archived
+  copy -- compared against the archive rather than held in memory, so a
+  restart or missed poll can't lose a change, and intent is captured even if
+  the NVUE revision hasn't moved yet. Commit messages record the trigger and
+  on-box revision. On startup, any switch whose intent is missing or stale is
+  captured immediately.
+- **UI**: no new tabs. Explore / Compare / History share a
+  Configuration | Intent toggle (web: persisted in localStorage; CLI: a menu
+  item). Intent has no on-box revision list, so History shows the archive
+  plus a "live intent" source to diff against.
+- **Timestamps**: the dashboard renders every time in the *browser's* zone
+  (switches report their own zone; commit subjects are UTC), with a relative
+  "x ago" and a live local clock in the header. The CLI uses the laptop's
+  local zone.
+- The intent file includes the `cumulus` user's NVUE password hash, so the
+  archive should be treated as sensitive (the applied config already has it).
+
 ## Not built (deliberately out of scope for this pass)
 - **Write-path rollback** (actually applying a prior revision) — the tool
   shows you the diff, applying it back is still a deliberate manual

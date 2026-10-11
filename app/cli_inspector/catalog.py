@@ -54,6 +54,13 @@ SHOW_COMMANDS: list[CatalogEntry] = [
     CatalogEntry("vtysh-interface-brief", "Interfaces (brief, vtysh)", "show", "sudo vtysh -c 'show interface brief'", "vtysh"),
 ]
 
+# The Netris *intent*: the NVUE YAML the on-switch agent (vxpd-nvue) renders
+# from what the controller pushed it. World-readable, no sudo needed. The
+# switch rewrites it on every render and keeps no history of it.
+INTENT_PATH = "/opt/netris/etc/nvue/00-netris.yaml"
+INTENT_COMMAND = f"cat {INTENT_PATH}"
+INTENT_ENTRY = CatalogEntry("netris-intent", "Netris intent (00-netris.yaml)", "intent", INTENT_COMMAND, "file")
+
 ALL_COMMANDS = CONFIG_COMMANDS + SHOW_COMMANDS
 
 

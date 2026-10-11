@@ -1,12 +1,22 @@
-"""Git-backed local archive of NVUE config snapshots.
+"""Git-backed local archive of NVUE config and Netris intent snapshots.
 
-Stores one ``<device_name>.commands`` file per device in a local git repo and
-commits a new revision only when the config text actually changed. This is
-the authoritative long-term history for the tool: on-box NVUE revision
-history is short-lived and unreliable, so this archive does not try to
-mirror it, only to record whatever full-config text it is handed.
+Stores, per device, in a local git repo:
+
+- ``<device>.commands`` (+ ``<device>.json``) -- the *configuration*, as
+  applied on the switch (``nv config show -r applied``).
+- ``<device>.intent.yaml`` -- the *intent*, the NVUE YAML the Netris agent
+  renders from what the controller sent it (``/opt/netris/etc/nvue/
+  00-netris.yaml``). The switch overwrites this file on every render and
+  keeps no history of it, so this archive is the only record.
+
+A new git commit is made only when the text actually changed. Each kind is
+committed on its own, so ``git log -- <file>`` is a clean per-kind history.
+This is the authoritative long-term history for the tool: on-box NVUE
+revision history is short-lived and unreliable, so the archive does not try
+to mirror it, only to record whatever text it is handed.
 """
 
+import hashlib
 import json
 import re
 import subprocess
@@ -17,6 +27,10 @@ from typing import Optional
 
 RECORD_SEP = "\x1e"
 FIELD_SEP = "\x1f"
+
+KIND_CONFIG = "config"
+KIND_INTENT = "intent"
+_KIND_SUFFIX = {KIND_CONFIG: ".commands", KIND_INTENT: ".intent.yaml"}
 
 
 class ArchiveError(RuntimeError):
@@ -44,16 +58,28 @@ def ensure_archive_repo(archive_dir: str) -> None:
     _run_ok(archive_dir, ["config", "user.email", "cli-inspector@localhost"])
 
 
-def _commit_message(device_name: str, meta: dict) -> str:
+def kind_filename(device_name: str, kind: str = KIND_CONFIG) -> str:
+    try:
+        return f"{device_name}{_KIND_SUFFIX[kind]}"
+    except KeyError:
+        raise ArchiveError(f"unknown kind {kind!r} (expected 'config' or 'intent')")
+
+
+def _commit_message(device_name: str, meta: dict, label: str = "snapshot") -> str:
     timestamp = meta.get("timestamp") or datetime.now(timezone.utc).isoformat()
-    lines = [f"snapshot: {device_name} @ {timestamp}", ""]
+    lines = [f"{label}: {device_name} @ {timestamp}", ""]
     lines.append(f"trigger: {meta.get('trigger', 'manual')}")
     if meta.get("site"):
         lines.append(f"site: {meta['site']}")
     if meta.get("on_box_rev") is not None:
         user = meta.get("on_box_user", "")
         message = meta.get("on_box_message", "")
-        lines.append(f"on-box revision: {meta['on_box_rev']} ({user}) - {message}")
+        line = f"on-box revision: {meta['on_box_rev']}"
+        if user:
+            line += f" ({user})"
+        if message:
+            line += f" - {message}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -90,6 +116,31 @@ def snapshot_device(
     return True
 
 
+def snapshot_intent(archive_dir: str, device_name: str, intent_text: str, meta: dict) -> bool:
+    """Writes <device>.intent.yaml and commits it only if the content changed."""
+    relative_path = kind_filename(device_name, KIND_INTENT)
+    (Path(archive_dir) / relative_path).write_text(intent_text)
+
+    _run_ok(archive_dir, ["add", relative_path])
+    diff_result = _run(archive_dir, ["diff", "--cached", "--quiet", "--", relative_path])
+    if diff_result.returncode == 0:
+        return False
+    if diff_result.returncode != 1:
+        raise ArchiveError(f"git diff --cached --quiet failed: {diff_result.stderr.strip()}")
+
+    _run_ok(archive_dir, ["commit", "-m", _commit_message(device_name, meta, label="intent"), "--", relative_path])
+    return True
+
+
+def intent_sha256(archive_dir: str, device_name: str) -> Optional[str]:
+    """SHA-256 of the archived intent file, or None. Lets the watcher tell on
+    startup whether the switch's intent moved while it wasn't running."""
+    file_path = Path(archive_dir) / kind_filename(device_name, KIND_INTENT)
+    if not file_path.exists():
+        return None
+    return hashlib.sha256(file_path.read_bytes()).hexdigest()
+
+
 def snapshot_many(
     archive_dir: str,
     device_configs: dict[str, str],
@@ -108,10 +159,10 @@ def snapshot_many(
     return results
 
 
-def history(archive_dir: str, device_name: str, limit: int = 20) -> list[dict]:
+def history(archive_dir: str, device_name: str, limit: int = 20, kind: str = KIND_CONFIG) -> list[dict]:
     if not (Path(archive_dir) / ".git").exists():
         return []
-    file_path = f"{device_name}.commands"
+    file_path = kind_filename(device_name, kind)
     log_format = f"%H{FIELD_SEP}%ad{FIELD_SEP}%s{FIELD_SEP}%b{RECORD_SEP}"
     result = _run(
         archive_dir,
@@ -150,17 +201,18 @@ def diff(
     device_name: str,
     rev_a: Optional[str] = None,
     rev_b: Optional[str] = None,
+    kind: str = KIND_CONFIG,
 ) -> str:
-    """Diff <device_name>.commands between two points.
+    """Diff the archived file of the given kind between two points.
 
     Both None: diff between the two most recent commits for the file
     (returns "" if fewer than 2 commits exist). Only rev_a given: diff from
     rev_a to the current working copy. Both given: diff between the two revs.
     """
-    file_path = f"{device_name}.commands"
+    file_path = kind_filename(device_name, kind)
 
     if rev_a is None and rev_b is None:
-        recent = history(archive_dir, device_name, limit=2)
+        recent = history(archive_dir, device_name, limit=2, kind=kind)
         if len(recent) < 2:
             return ""
         rev_b, rev_a = recent[0]["commit"], recent[1]["commit"]
@@ -176,15 +228,15 @@ def diff(
     return result.stdout
 
 
-def show_at(archive_dir: str, device_name: str, rev: str) -> str:
-    result = _run(archive_dir, ["show", f"{rev}:{device_name}.commands"])
+def show_at(archive_dir: str, device_name: str, rev: str, kind: str = KIND_CONFIG) -> str:
+    result = _run(archive_dir, ["show", f"{rev}:{kind_filename(device_name, kind)}"])
     if result.returncode != 0:
         raise ArchiveError(f"git show failed: {result.stderr.strip()}")
     return result.stdout
 
 
-def latest_snapshot_text(archive_dir: str, device_name: str) -> Optional[str]:
-    file_path = Path(archive_dir) / f"{device_name}.commands"
+def latest_snapshot_text(archive_dir: str, device_name: str, kind: str = KIND_CONFIG) -> Optional[str]:
+    file_path = Path(archive_dir) / kind_filename(device_name, kind)
     if not file_path.exists():
         return None
     return file_path.read_text()
@@ -226,6 +278,7 @@ def save_diff(
     diff_text: str,
     text_a: str = "",
     text_b: str = "",
+    kind: str = KIND_CONFIG,
 ) -> str:
     ensure_archive_repo(archive_dir)
     saved_dir = Path(archive_dir) / "saved-diffs" / device_name
@@ -238,6 +291,7 @@ def save_diff(
         "device": device_name,
         "label": label,
         "timestamp": timestamp.isoformat(),
+        "kind": kind,
         "source_a": source_a_desc,
         "source_b": source_b_desc,
         "diff": diff_text,

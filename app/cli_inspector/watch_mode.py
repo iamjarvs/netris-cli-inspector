@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from . import archive, ui
+from .capture import SENTINEL_COMMAND, parse_sentinel, sync_intent
 from .diff_utils import DeviceDiffResult, parse_config_changes, parse_device_context, side_by_side, unified_diff
 from .executor import SwitchExecutor
 from .inventory import (
@@ -55,6 +56,7 @@ class WatchEngine:
         # Device baselines: device_name -> full config text
         self.baselines: dict[str, str] = {}
         self.last_revs: dict[str, str] = {}
+        self.last_intent_updates: list[str] = []  # switches whose Netris intent was captured on the last poll
         self.roles: dict[str, str] = {}
         self.pairs: list[tuple[str, str]] = []
         self.last_poll_epoch: int = int(time.time())
@@ -101,11 +103,17 @@ class WatchEngine:
                         }
                         archive.snapshot_device(self.archive_dir, name, res.stdout, meta)
 
-        # Populate current revision IDs
-        rev_res = self.executor.exec_many(self.pairs, "nv config history | sed -n 3p | awk '{print $1}'", timeout=8)
+        # Populate current revision IDs, and archive the Netris intent of any
+        # switch whose intent isn't captured yet (or moved while we weren't watching).
+        rev_res = self.executor.exec_many(self.pairs, SENTINEL_COMMAND, timeout=8)
+        shas: dict[str, Optional[str]] = {}
+        revs: dict[str, Optional[str]] = {}
         for name, r in rev_res.items():
-            if r.ok and r.stdout.strip():
-                self.last_revs[name] = r.stdout.strip()
+            if r.ok:
+                revs[name], shas[name] = parse_sentinel(r.stdout)
+                if revs[name]:
+                    self.last_revs[name] = revs[name]
+        sync_intent(self.executor, self.archive_dir, self.pairs, shas, "watch-baseline", self.site_name, revs)
 
         self.last_poll_epoch = int(time.time()) - 30  # include any write in the last 30s
 
@@ -129,15 +137,37 @@ class WatchEngine:
         if new_events:
             self.last_events.extend(new_events)
 
-        # 2. Check Revision ID Sentinel across all monitored switches
-        rev_results = self.executor.exec_many(self.pairs, "nv config history | sed -n 3p | awk '{print $1}'", timeout=8)
+        # 2. Check Revision ID Sentinel across all monitored switches. The same
+        # call also hashes each switch's Netris intent file, so a change to the
+        # intent is captured even when the NVUE revision hasn't moved yet.
+        rev_results = self.executor.exec_many(self.pairs, SENTINEL_COMMAND, timeout=8)
+        sentinel = {
+            name: parse_sentinel(res.stdout) if res and res.ok else (None, None)
+            for name, res in rev_results.items()
+        }
+        self.last_intent_updates = [
+            name
+            for name, committed in sync_intent(
+                self.executor,
+                self.archive_dir,
+                self.pairs,
+                {n: sha for n, (_rev, sha) in sentinel.items()},
+                trigger="watch: intent changed",
+                site=self.site_name,
+                revisions={n: rev for n, (rev, _sha) in sentinel.items()},
+            ).items()
+            if committed
+        ]
+        if self.last_intent_updates:
+            console.print(
+                f"[bold cyan]◆ Netris intent captured:[/bold cyan] {', '.join(sorted(self.last_intent_updates))}"
+            )
 
         switches_to_pull: list[tuple[str, str]] = []
         unchanged_names: list[str] = []
 
         for name, addr in self.pairs:
-            res = rev_results.get(name)
-            curr_rev = res.stdout.strip() if (res and res.ok) else None
+            curr_rev = sentinel.get(name, (None, None))[0]
             prev_rev = self.last_revs.get(name)
             has_baseline = name in self.baselines
 
@@ -164,7 +194,7 @@ class WatchEngine:
 
                 current_text = res.stdout
                 old_text = self.baselines.get(name)
-                curr_rev = rev_results.get(name).stdout.strip() if (rev_results.get(name) and rev_results.get(name).ok) else None
+                curr_rev = sentinel.get(name, (None, None))[0]
                 if curr_rev:
                     self.last_revs[name] = curr_rev
 
