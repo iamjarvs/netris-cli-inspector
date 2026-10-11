@@ -1,10 +1,9 @@
-import { useFitMonoFontSize } from '../hooks/useFitMonoFontSize'
+import StructuredViewer from './StructuredViewer'
 import Badge from './ui/Badge'
 
-export default function ResultPanel({ title, result }) {
-  const { ok, stdout, stderr, exit_status: exitStatus, error, pretty } = result ?? {}
-  const formatted = pretty ?? stdout
-  const [containerRef, fontSize] = useFitMonoFontSize(formatted ?? '', { paddingPx: 32, minSize: 7, maxSize: 12 })
+// `filename` is the base name used when the output is downloaded.
+export default function ResultPanel({ title, result, filename }) {
+  const { ok, stdout, stderr, exit_status: exitStatus, error } = result ?? {}
 
   if (!result) return null
 
@@ -19,17 +18,11 @@ export default function ResultPanel({ title, result }) {
           <Badge color={ok ? 'success' : 'error'}>{ok ? 'ok' : 'failed'}</Badge>
         </div>
       </div>
-      <div ref={containerRef} className="max-h-[480px] overflow-y-auto overflow-x-hidden p-4">
+      <div className="p-4">
         {!ok && (
           <p className="mb-3 whitespace-pre-wrap text-theme-sm text-error-600">{error || stderr || 'Command failed with no error message.'}</p>
         )}
-        {formatted ? (
-          <pre className="whitespace-pre font-mono text-gray-700" style={{ fontSize: `${fontSize}px` }}>
-            {formatted}
-          </pre>
-        ) : (
-          <p className="text-theme-sm text-gray-500">No output.</p>
-        )}
+        <StructuredViewer text={stdout ?? ''} filename={filename ?? title} />
       </div>
     </div>
   )

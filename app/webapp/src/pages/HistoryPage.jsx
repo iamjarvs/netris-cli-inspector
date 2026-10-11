@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getArchiveHistory, getOnboxHistory, postArchiveSnapshot } from '../api'
 import PageBreadcrumb from '../components/layout/PageBreadcrumb'
+import KindToggle from '../components/KindToggle'
 import SiteSelect from '../components/SiteSelect'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
@@ -8,14 +9,23 @@ import EmptyState from '../components/ui/EmptyState'
 import Select from '../components/ui/Select'
 import Toast from '../components/ui/Toast'
 import { useSiteContext } from '../context/SiteContext'
+import { useViewKind } from '../context/ViewKindContext'
 import ArchiveTable from './history/ArchiveTable'
 import CompareViewer from './history/CompareViewer'
 import RevisionTable from './history/RevisionTable'
 import SourceSelect from './history/SourceSelect'
-import { archiveSnapshotOptions, decodeSource, encodeSource, FIXED_SOURCES, onboxRevisionOptions } from './history/sourceOptions'
+import {
+  archiveSnapshotOptions,
+  decodeSource,
+  encodeSource,
+  FIXED_SOURCES,
+  INTENT_FIXED_SOURCES,
+  onboxRevisionOptions,
+} from './history/sourceOptions'
 
 export default function HistoryPage() {
   const { devices } = useSiteContext()
+  const { kind, isIntent } = useViewKind()
   const [selectedDevice, setSelectedDevice] = useState('')
   const [hideStartup, setHideStartup] = useState(true)
   const [hidePruned, setHidePruned] = useState(true)
@@ -29,17 +39,32 @@ export default function HistoryPage() {
 
   const device = devices.find((d) => d.name === selectedDevice)
 
+  // The switch only keeps NVUE *config* revisions. Intent has no on-box
+  // history (the file is overwritten each render), so for intent the archive
+  // is the whole story and the on-box revision list isn't fetched at all.
+  const currentSource = { type: 'onbox', ref: isIntent ? 'live' : 'applied' }
+
   function loadHistory(dev, { signal } = {}) {
-    setOnboxHistory({ loading: true, error: null, data: null })
-    getOnboxHistory(dev.name, dev.mgmt_address)
-      .then((data) => !signal?.cancelled && setOnboxHistory({ loading: false, error: null, data }))
-      .catch((err) => !signal?.cancelled && setOnboxHistory({ loading: false, error: err.message, data: null }))
+    if (isIntent) {
+      setOnboxHistory({ loading: false, error: null, data: null })
+    } else {
+      setOnboxHistory({ loading: true, error: null, data: null })
+      getOnboxHistory(dev.name, dev.mgmt_address)
+        .then((data) => !signal?.cancelled && setOnboxHistory({ loading: false, error: null, data }))
+        .catch((err) => !signal?.cancelled && setOnboxHistory({ loading: false, error: err.message, data: null }))
+    }
 
     setArchiveHistory({ loading: true, error: null, data: null })
-    getArchiveHistory(dev.name)
+    getArchiveHistory(dev.name, 20, kind)
       .then((data) => !signal?.cancelled && setArchiveHistory({ loading: false, error: null, data }))
       .catch((err) => !signal?.cancelled && setArchiveHistory({ loading: false, error: err.message, data: null }))
   }
+
+  // handleSnapshot awaits a slow request; by the time it finishes the user may
+  // have flipped Configuration/Intent, so it must reload with the *latest*
+  // loadHistory, not the one from the render that started it.
+  const loadHistoryRef = useRef(loadHistory)
+  loadHistoryRef.current = loadHistory
 
   useEffect(() => {
     setComparison(null)
@@ -58,7 +83,7 @@ export default function HistoryPage() {
     return () => {
       signal.cancelled = true
     }
-  }, [device?.name])
+  }, [device?.name, kind])
 
   function handleRefresh() {
     if (!device) return
@@ -70,10 +95,15 @@ export default function HistoryPage() {
     setSnapshot({ loading: true, toast: null })
     try {
       const res = await postArchiveSnapshot([device.name])
+      const configChanged = res.results?.[device.name]
+      const intentChanged = res.intent_results?.[device.name]
       if (res.failed?.includes(device.name)) {
-        setSnapshot({ loading: false, toast: { message: `Snapshot failed for ${device.name}.`, color: 'error' } })
-      } else if (res.results?.[device.name]) {
-        setSnapshot({ loading: false, toast: { message: 'Snapshot recorded a configuration change.', color: 'success' } })
+        const why = res.errors?.[device.name]
+        setSnapshot({ loading: false, toast: { message: `Snapshot failed for ${device.name}${why ? `: ${why}` : '.'}`, color: 'error' } })
+      } else if (configChanged || intentChanged) {
+        const what = [configChanged && 'configuration', intentChanged && 'intent'].filter(Boolean).join(' and ')
+        setSnapshot({ loading: false, toast: { message: `Snapshot recorded a change to the ${what}.`, color: 'success' } })
+        loadHistoryRef.current(device)
       } else {
         setSnapshot({ loading: false, toast: { message: 'No change since last snapshot.', color: 'info' } })
       }
@@ -84,12 +114,13 @@ export default function HistoryPage() {
 
   const revisions = onboxHistory.data?.revisions ?? []
   const archiveEntries = archiveHistory.data?.entries ?? []
-  const onboxOptions = onboxRevisionOptions(revisions, hideStartup, hidePruned)
+  const onboxOptions = isIntent ? [] : onboxRevisionOptions(revisions, hideStartup, hidePruned)
   const archiveOptions = archiveSnapshotOptions(archiveEntries)
-  const vsTargetOptions = FIXED_SOURCES.filter((f) => f.ref !== 'applied')
+  const fixedSources = isIntent ? INTENT_FIXED_SOURCES : FIXED_SOURCES
+  const vsTargetOptions = fixedSources.filter((f) => f.ref !== currentSource.ref)
 
   function handleCompare(sourceA, sourceB) {
-    setComparison({ sourceA, sourceB })
+    setComparison({ sourceA, sourceB, kind })
   }
 
   // The other source is the "from" side (A) and current/applied is the "to"
@@ -102,12 +133,12 @@ export default function HistoryPage() {
       setComparison(null)
       return
     }
-    handleCompare(decodeSource(value), { type: 'onbox', ref: 'applied' })
+    handleCompare(decodeSource(value), currentSource)
   }
 
   function handleRowCompare(source) {
     setCurrentVsValue(encodeSource(source.type, source.ref))
-    handleCompare(source, { type: 'onbox', ref: 'applied' })
+    handleCompare(source, currentSource)
   }
 
   function handleTwoSourceCompare() {
@@ -120,6 +151,9 @@ export default function HistoryPage() {
       <PageBreadcrumb title="History" />
 
       <Card title="Device">
+        <div className="mb-4">
+          <KindToggle />
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
           <SiteSelect />
           <Select label="Device" value={selectedDevice} onChange={(e) => setSelectedDevice(e.target.value)}>
@@ -138,7 +172,7 @@ export default function HistoryPage() {
             {onboxHistory.loading || archiveHistory.loading ? 'Refreshing…' : 'Refresh'}
           </Button>
           <Button onClick={handleSnapshot} disabled={!device || snapshot.loading}>
-            {snapshot.loading ? 'Snapshotting…' : 'Snapshot now'}
+            {snapshot.loading ? 'Snapshotting…' : 'Snapshot now (config + intent)'}
           </Button>
         </div>
         {snapshot.toast && (
@@ -156,7 +190,14 @@ export default function HistoryPage() {
         </Card>
       ) : (
         <>
-          <Card title="Current vs…" description="Compare the device's current running configuration against an earlier point.">
+          <Card
+            title="Current vs…"
+            description={
+              isIntent
+                ? "Compare the intent currently on the switch against an earlier archived capture."
+                : "Compare the device's current running configuration against an earlier point."
+            }
+          >
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <SourceSelect
                 label="Compare current against"
@@ -165,9 +206,10 @@ export default function HistoryPage() {
                 fixedOptions={vsTargetOptions}
                 onboxOptions={onboxOptions}
                 archiveOptions={archiveOptions}
+                showOnbox={!isIntent}
               />
             </div>
-            <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2">
+            <div className={`mt-4 flex flex-wrap gap-x-6 gap-y-2 ${isIntent ? 'hidden' : ''}`}>
               <label className="flex items-center gap-2.5 text-theme-sm text-gray-700">
                 <input
                   type="checkbox"
@@ -192,42 +234,68 @@ export default function HistoryPage() {
 
           <div className="h-6" />
 
-          {comparison && (
+          {/* A comparison belongs to the Configuration/Intent choice it was made under. */}
+          {comparison && comparison.kind === kind && (
             <>
-              <CompareViewer device={device} sourceA={comparison.sourceA} sourceB={comparison.sourceB} />
+              <CompareViewer device={device} sourceA={comparison.sourceA} sourceB={comparison.sourceB} kind={kind} />
               <div className="h-6" />
             </>
           )}
 
-          <Card title="On-box revision history">
-            <RevisionTable state={onboxHistory} hideStartup={hideStartup} hidePruned={hidePruned} onCompare={handleRowCompare} />
+          {!isIntent && (
+            <>
+              <Card title="On-box revision history">
+                <RevisionTable state={onboxHistory} hideStartup={hideStartup} hidePruned={hidePruned} onCompare={handleRowCompare} />
+              </Card>
+              <div className="h-6" />
+            </>
+          )}
+
+          <Card
+            title={isIntent ? 'Intent archive history' : 'Archive history'}
+            description={
+              isIntent
+                ? 'The switch overwrites its intent file every time the agent renders it and keeps no history, so every version here was captured by this tool when a change was detected.'
+                : undefined
+            }
+          >
+            <ArchiveTable
+              state={archiveHistory}
+              device={device.name}
+              mgmtAddress={device.mgmt_address}
+              onCompare={handleRowCompare}
+              kind={kind}
+            />
           </Card>
 
           <div className="h-6" />
 
-          <Card title="Archive history">
-            <ArchiveTable state={archiveHistory} device={device.name} mgmtAddress={device.mgmt_address} onCompare={handleRowCompare} />
-          </Card>
-
-          <div className="h-6" />
-
-          <Card title="Compare two sources" description="Pick any two on-box revisions or archive snapshots to diff against each other.">
+          <Card
+            title="Compare two sources"
+            description={
+              isIntent
+                ? 'Pick the live intent or any archived capture on each side to diff them.'
+                : 'Pick any two on-box revisions or archive snapshots to diff against each other.'
+            }
+          >
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto] sm:items-end">
               <SourceSelect
                 label="Side A"
                 value={sideAValue}
                 onChange={setSideAValue}
-                fixedOptions={FIXED_SOURCES}
+                fixedOptions={fixedSources}
                 onboxOptions={onboxOptions}
                 archiveOptions={archiveOptions}
+                showOnbox={!isIntent}
               />
               <SourceSelect
                 label="Side B"
                 value={sideBValue}
                 onChange={setSideBValue}
-                fixedOptions={FIXED_SOURCES}
+                fixedOptions={fixedSources}
                 onboxOptions={onboxOptions}
                 archiveOptions={archiveOptions}
+                showOnbox={!isIntent}
               />
               <Button onClick={handleTwoSourceCompare} disabled={!sideAValue || !sideBValue}>
                 Compare

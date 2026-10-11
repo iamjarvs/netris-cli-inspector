@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import { getConfigDiff, getConfigSource, postSavedDiff } from '../../api'
-import ConfigTree from '../../components/ConfigTree'
 import DiffView from '../../components/DiffView'
-import FitPre from '../../components/FitPre'
 import SideBySideDiffView from '../../components/SideBySideDiffView'
+import StructuredViewer from '../../components/StructuredViewer'
 import Button from '../../components/ui/Button'
 import Card from '../../components/ui/Card'
 import ErrorState from '../../components/ui/ErrorState'
@@ -13,28 +12,29 @@ import Toast from '../../components/ui/Toast'
 import ToggleGroup from '../../components/ui/ToggleGroup'
 import { describeSource } from './sourceOptions'
 
-const VIEW_OPTIONS = [
-  { value: 'diff', label: 'Diff' },
-  { value: 'full', label: 'Full config' },
-]
+function viewOptions(kind) {
+  return [
+    { value: 'diff', label: 'Diff' },
+    { value: 'full', label: kind === 'intent' ? 'Full intent' : 'Full config' },
+  ]
+}
 
 const DIFF_MODE_OPTIONS = [
   { value: 'inline', label: 'Inline' },
   { value: 'side-by-side', label: 'Side-by-side' },
 ]
 
-export default function CompareViewer({ device, sourceA, sourceB }) {
+export default function CompareViewer({ device, sourceA, sourceB, kind = 'config' }) {
   const [diffState, setDiffState] = useState({ loading: false, error: null, data: null })
   const [viewMode, setViewMode] = useState('diff')
   const [diffMode, setDiffMode] = useState('inline')
   const [fullState, setFullState] = useState({ loading: false, key: null, jsonA: null, jsonB: null, errorA: null, errorB: null })
-  const [collapsedPaths, setCollapsedPaths] = useState(new Set())
   const [showSaveInput, setShowSaveInput] = useState(false)
   const [saveLabel, setSaveLabel] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveToast, setSaveToast] = useState(null)
 
-  const key = `${sourceA.type}:${sourceA.ref}|${sourceB.type}:${sourceB.ref}`
+  const key = `${kind}|${sourceA.type}:${sourceA.ref}|${sourceB.type}:${sourceB.ref}`
 
   useEffect(() => {
     let cancelled = false
@@ -43,7 +43,6 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
     setDiffMode('inline')
     setShowSaveInput(false)
     setSaveToast(null)
-    setCollapsedPaths(new Set())
     setFullState({ loading: false, key: null, jsonA: null, jsonB: null, errorA: null, errorB: null })
 
     getConfigDiff({
@@ -53,6 +52,7 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
       aRef: sourceA.ref,
       bType: sourceB.type,
       bRef: sourceB.ref,
+      kind,
     })
       .then((data) => !cancelled && setDiffState({ loading: false, error: null, data }))
       .catch((err) => !cancelled && setDiffState({ loading: false, error: err.message, data: null }))
@@ -69,8 +69,8 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
     setFullState((s) => ({ ...s, loading: true }))
 
     Promise.allSettled([
-      getConfigSource({ device: device.name, mgmtAddress: device.mgmt_address, sourceType: sourceA.type, ref: sourceA.ref, format: 'json' }),
-      getConfigSource({ device: device.name, mgmtAddress: device.mgmt_address, sourceType: sourceB.type, ref: sourceB.ref, format: 'json' }),
+      getConfigSource({ device: device.name, mgmtAddress: device.mgmt_address, sourceType: sourceA.type, ref: sourceA.ref, format: 'json', kind }),
+      getConfigSource({ device: device.name, mgmtAddress: device.mgmt_address, sourceType: sourceB.type, ref: sourceB.ref, format: 'json', kind }),
     ]).then(([resA, resB]) => {
       if (cancelled) return
       setFullState({
@@ -89,15 +89,6 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode, key])
 
-  function toggleCollapsed(path) {
-    setCollapsedPaths((prev) => {
-      const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
-
   async function handleSave() {
     if (!diffState.data || !saveLabel.trim()) return
     setSaving(true)
@@ -107,6 +98,7 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
         label: saveLabel.trim(),
         source_a_desc: describeSource(sourceA),
         source_b_desc: describeSource(sourceB),
+        kind,
         diff: diffState.data.diff,
         text_a: diffState.data.text_a,
         text_b: diffState.data.text_b,
@@ -129,13 +121,13 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
   const bothJson = fullState.jsonA !== null && fullState.jsonB !== null
 
   return (
-    <Card title="Comparison">
+    <Card title={kind === 'intent' ? 'Intent comparison' : 'Comparison'}>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <p className="text-theme-sm text-gray-500">
           {describeSource(sourceA)} <span className="text-gray-400">vs</span> {describeSource(sourceB)}
         </p>
         <div className="flex flex-wrap items-center gap-3">
-          <ToggleGroup options={VIEW_OPTIONS} value={viewMode} onChange={setViewMode} />
+          <ToggleGroup options={viewOptions(kind)} value={viewMode} onChange={setViewMode} />
           {viewMode === 'diff' && <ToggleGroup options={DIFF_MODE_OPTIONS} value={diffMode} onChange={setDiffMode} />}
           <Button variant="outline" size="sm" onClick={() => setShowSaveInput((v) => !v)}>
             Save this diff
@@ -170,32 +162,28 @@ export default function CompareViewer({ device, sourceA, sourceB }) {
           <SideBySideDiffView rows={sideBySide} leftLabel={describeSource(sourceA)} rightLabel={describeSource(sourceB)} />
         )
       ) : fullState.loading ? (
-        <LoadingState label="Loading full configuration…" />
-      ) : bothJson ? (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div>
-            <p className="mb-2 text-theme-xs font-medium text-gray-500">{describeSource(sourceA)}</p>
-            <div className="max-h-[560px] overflow-y-auto overflow-x-hidden rounded-xl border border-gray-200 bg-white p-3">
-              <ConfigTree data={fullState.jsonA} collapsedPaths={collapsedPaths} onToggle={toggleCollapsed} />
-            </div>
-          </div>
-          <div>
-            <p className="mb-2 text-theme-xs font-medium text-gray-500">{describeSource(sourceB)}</p>
-            <div className="max-h-[560px] overflow-y-auto overflow-x-hidden rounded-xl border border-gray-200 bg-white p-3">
-              <ConfigTree data={fullState.jsonB} collapsedPaths={collapsedPaths} onToggle={toggleCollapsed} />
-            </div>
-          </div>
-        </div>
+        <LoadingState label={`Loading full ${kind === 'intent' ? 'intent' : 'configuration'}…`} />
       ) : (
         <>
           {(fullState.errorA || fullState.errorB) && (
             <div className="mb-3">
-              <ErrorState message="No structured view available for this snapshot — showing raw configuration text instead." />
+              <ErrorState message="No structured view available for this snapshot — showing raw text instead." />
             </div>
           )}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <FitPre text={textA} />
-            <FitPre text={textB} />
+            {[
+              { source: sourceA, json: fullState.jsonA, text: textA, side: 'a' },
+              { source: sourceB, json: fullState.jsonB, text: textB, side: 'b' },
+            ].map(({ source, json, text, side }) => (
+              <div key={side} className="min-w-0">
+                <p className="mb-2 text-theme-xs font-medium text-gray-500">{describeSource(source)}</p>
+                {bothJson ? (
+                  <StructuredViewer data={json} filename={`${device.name}-${kind}-${describeSource(source)}`} maxHeight={560} />
+                ) : (
+                  <StructuredViewer text={text} filename={`${device.name}-${kind}-${describeSource(source)}`} maxHeight={560} />
+                )}
+              </div>
+            ))}
           </div>
         </>
       )}

@@ -69,8 +69,8 @@ export function getOnboxHistory(device, mgmtAddress) {
   return request(`/api/history/onbox${query({ device, mgmt_address: mgmtAddress })}`)
 }
 
-export function getArchiveHistory(device, limit = 20) {
-  return request(`/api/history/archive${query({ device, limit })}`)
+export function getArchiveHistory(device, limit = 20, kind = 'config') {
+  return request(`/api/history/archive${query({ device, limit, kind })}`)
 }
 
 export function postArchiveSnapshot(targets) {
@@ -97,13 +97,13 @@ export function postRevisionsApply(targets, value) {
   })
 }
 
-export function getConfigSource({ device, mgmtAddress, sourceType, ref, format = 'text' }) {
+export function getConfigSource({ device, mgmtAddress, sourceType, ref, format = 'text', kind = 'config' }) {
   return request(
-    `/api/config/source${query({ device, mgmt_address: mgmtAddress, source_type: sourceType, ref, format })}`,
+    `/api/config/source${query({ device, mgmt_address: mgmtAddress, source_type: sourceType, ref, format, kind })}`,
   )
 }
 
-export function getConfigDiff({ device, mgmtAddress, aType, aRef, bType, bRef }) {
+export function getConfigDiff({ device, mgmtAddress, aType, aRef, bType, bRef, kind = 'config' }) {
   return request(
     `/api/config/diff${query({
       device,
@@ -112,6 +112,7 @@ export function getConfigDiff({ device, mgmtAddress, aType, aRef, bType, bRef })
       a_ref: aRef,
       b_type: bType,
       b_ref: bRef,
+      kind,
     })}`,
   )
 }

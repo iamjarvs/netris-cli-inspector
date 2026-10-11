@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { deleteSavedDiff, getSavedDiff, getSavedDiffs } from '../api'
 import DiffView from '../components/DiffView'
+import Time from '../components/Time'
 import SideBySideDiffView from '../components/SideBySideDiffView'
 import PageBreadcrumb from '../components/layout/PageBreadcrumb'
+import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import EmptyState from '../components/ui/EmptyState'
@@ -93,19 +95,26 @@ export default function DiffExamplesPage() {
                     <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Label</th>
                     <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Device</th>
                     <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Sources</th>
-                    <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Saved</th>
+                    <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Saved (your time)</th>
                     <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {list.items.map((item) => (
                     <tr key={item.id}>
-                      <td className="px-5 py-4 text-theme-sm font-medium text-gray-800">{item.label}</td>
+                      <td className="px-5 py-4 text-theme-sm font-medium text-gray-800">
+                        {item.label}
+                        {item.kind === 'intent' && (
+                          <span className="ml-2">
+                            <Badge color="info">intent</Badge>
+                          </span>
+                        )}
+                      </td>
                       <td className="px-5 py-4 text-theme-sm text-gray-700">{item.device}</td>
                       <td className="px-5 py-4 text-theme-sm text-gray-500">
                         {item.source_a} <span className="text-gray-400">vs</span> {item.source_b}
                       </td>
-                      <td className="px-5 py-4 text-theme-sm text-gray-500">{new Date(item.timestamp).toLocaleString()}</td>
+                      <td className="px-5 py-4 text-theme-sm text-gray-500"><Time value={item.timestamp} /></td>
                       <td className="px-5 py-4 text-theme-sm">
                         <div className="flex gap-2">
                           <Button variant="outline" size="sm" onClick={() => handleView(item)}>

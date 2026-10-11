@@ -1,8 +1,17 @@
+import { formatLocal, shortSubject } from '../../lib/time'
+
 export const FIXED_SOURCES = [
   { type: 'onbox', ref: 'applied', label: 'Current (applied)', desc: 'current (applied)' },
   { type: 'onbox', ref: 'startup', label: 'Startup (current on-box)', desc: 'startup (current on-box)' },
   { type: 'onbox', ref: 'pending', label: 'Pending', desc: 'pending' },
   { type: 'onbox', ref: 'operational', label: 'Operational', desc: 'operational' },
+]
+
+// The switch keeps exactly one copy of the Netris intent file (what it holds
+// right now), so "live" is the only on-box source for intent; everything
+// older comes from the archive.
+export const INTENT_FIXED_SOURCES = [
+  { type: 'onbox', ref: 'live', label: 'Live intent (current on switch)', desc: 'live intent (current on switch)' },
 ]
 
 export function encodeSource(type, ref) {
@@ -21,29 +30,22 @@ export function onboxRevisionOptions(revisions, hideStartup, hidePruned = true) 
     .map((r) => ({
       type: 'onbox',
       ref: r.rev_id,
-      label: r.pruned ? `${r.rev_id} — ${r.apply_date} (${r.user})  [pruned]` : `${r.rev_id} — ${r.apply_date} (${r.user})`,
+      label: `${r.rev_id} — ${formatLocal(r.apply_date)} (${r.user})${r.pruned ? '  [pruned]' : ''}`,
     }))
-}
-
-function formatArchiveDate(iso) {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 export function archiveSnapshotOptions(entries) {
   return (entries ?? []).map((e) => ({
     type: 'archive',
     ref: e.commit,
-    label: `${e.commit.slice(0, 7)} — ${formatArchiveDate(e.date)} — ${e.subject}`,
+    label: `${e.commit.slice(0, 7)} — ${formatLocal(e.date)} — ${shortSubject(e.subject)}`,
   }))
 }
 
 export function describeSource(source) {
   if (!source) return ''
   if (source.type === 'onbox') {
-    const fixed = FIXED_SOURCES.find((f) => f.ref === source.ref)
+    const fixed = [...FIXED_SOURCES, ...INTENT_FIXED_SOURCES].find((f) => f.ref === source.ref)
     if (fixed) return fixed.desc
     return `on-box rev ${source.ref}`
   }

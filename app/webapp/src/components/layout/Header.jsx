@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
 import { getHealth } from '../../api'
+import { useNow } from '../../hooks/useNow'
+import { browserTimeZone, formatClock } from '../../lib/time'
 import { CollapseSidebarIcon, ExpandSidebarIcon, MenuIcon } from '../icons'
 
 export default function Header({ onMenuClick, isCollapsed, onToggleCollapse }) {
   const [status, setStatus] = useState('checking')
+  const now = useNow()
+  const timeZone = browserTimeZone()
 
   useEffect(() => {
     let cancelled = false
@@ -68,8 +72,16 @@ export default function Header({ onMenuClick, isCollapsed, onToggleCollapse }) {
             <CollapseSidebarIcon className="h-4.5 w-4.5" />
           )}
         </button>
-      </div>
 
+        {/* Clock in the browser's own time zone -- every timestamp below uses it too */}
+        <div
+          className="flex items-baseline gap-2 text-theme-sm text-gray-600"
+          title="Every timestamp in the dashboard is shown in your browser's time zone, not the switch's."
+        >
+          <span className="font-mono tabular-nums text-gray-800">{formatClock(new Date(now))}</span>
+          {timeZone && <span className="hidden text-theme-xs text-gray-400 sm:inline">{timeZone}</span>}
+        </div>
+      </div>
       <div className="flex items-center gap-2 text-theme-sm">
         <span className={`h-2 w-2 rounded-full ${statusDot}`} />
         <span className={statusTextClasses}>{statusText}</span>

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { postCompare } from '../api'
 import CommandPicker from '../components/CommandPicker'
 import DiffView from '../components/DiffView'
+import KindToggle from '../components/KindToggle'
 import PageBreadcrumb from '../components/layout/PageBreadcrumb'
 import ResultPanel from '../components/ResultPanel'
 import SideBySideDiffView from '../components/SideBySideDiffView'
@@ -13,7 +14,9 @@ import Input from '../components/ui/Input'
 import LoadingState from '../components/ui/LoadingState'
 import Select from '../components/ui/Select'
 import ToggleGroup from '../components/ui/ToggleGroup'
+import { useCatalog } from '../context/CatalogContext'
 import { useSiteContext } from '../context/SiteContext'
+import { useViewKind } from '../context/ViewKindContext'
 
 const DIFF_MODE_OPTIONS = [
   { value: 'inline', label: 'Inline' },
@@ -22,6 +25,8 @@ const DIFF_MODE_OPTIONS = [
 
 export default function ComparePage() {
   const { devices, devicesLoading, devicesError } = useSiteContext()
+  const { isIntent } = useViewKind()
+  const { intent } = useCatalog()
   const [deviceA, setDeviceA] = useState('')
   const [deviceB, setDeviceB] = useState('')
   const [selectedId, setSelectedId] = useState('')
@@ -35,11 +40,13 @@ export default function ComparePage() {
     if (entry) setCommand(entry.command)
   }
 
+  const effectiveCommand = isIntent ? (intent?.command ?? '') : command
+
   async function handleCompare() {
-    if (!deviceA || !deviceB || !command.trim()) return
+    if (!deviceA || !deviceB || !effectiveCommand.trim()) return
     setRun({ loading: true, error: null, data: null })
     try {
-      const data = await postCompare(deviceA, deviceB, command.trim())
+      const data = await postCompare(deviceA, deviceB, effectiveCommand.trim())
       setRun({ loading: false, error: null, data })
     } catch (err) {
       setRun({ loading: false, error: err.message, data: null })
@@ -50,9 +57,19 @@ export default function ComparePage() {
     <div>
       <PageBreadcrumb title="Compare" />
 
-      <Card title="Compare two devices" description="Run the same command on two devices and see a structural diff.">
+      <Card
+        title="Compare two devices"
+        description={
+          isIntent
+            ? 'Compare the Netris intent file (what the controller had each agent render) between two devices.'
+            : 'Run the same command on two devices and see a structural diff.'
+        }
+      >
         {devicesError && <ErrorState message={devicesError} />}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="mb-4">
+          <KindToggle />
+        </div>
+        <div className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${isIntent ? 'lg:grid-cols-3' : 'lg:grid-cols-4'}`}>
           <SiteSelect />
           <Select label="Device A" value={deviceA} onChange={(e) => setDeviceA(e.target.value)} disabled={devicesLoading}>
             <option value="">Select a device…</option>
@@ -70,19 +87,23 @@ export default function ComparePage() {
               </option>
             ))}
           </Select>
-          <CommandPicker selectedId={selectedId} onSelect={handlePick} />
+          {!isIntent && <CommandPicker selectedId={selectedId} onSelect={handlePick} />}
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
-          <Input
-            label="Command"
-            value={command}
-            onChange={(e) => {
-              setCommand(e.target.value)
-              setSelectedId('')
-            }}
-          />
-          <Button onClick={handleCompare} disabled={!deviceA || !deviceB || !command.trim() || run.loading}>
+          {isIntent ? (
+            <Input label="Command (Netris intent file)" value={effectiveCommand} readOnly />
+          ) : (
+            <Input
+              label="Command"
+              value={command}
+              onChange={(e) => {
+                setCommand(e.target.value)
+                setSelectedId('')
+              }}
+            />
+          )}
+          <Button onClick={handleCompare} disabled={!deviceA || !deviceB || !effectiveCommand.trim() || run.loading}>
             {run.loading ? 'Comparing…' : 'Compare'}
           </Button>
         </div>
@@ -96,8 +117,8 @@ export default function ComparePage() {
       {run.data && (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <ResultPanel title={run.data.device_a} result={run.data.result_a} />
-            <ResultPanel title={run.data.device_b} result={run.data.result_b} />
+            <ResultPanel title={run.data.device_a} result={run.data.result_a} filename={`${run.data.device_a}-${isIntent ? 'intent' : effectiveCommand}`} />
+            <ResultPanel title={run.data.device_b} result={run.data.result_b} filename={`${run.data.device_b}-${isIntent ? 'intent' : effectiveCommand}`} />
           </div>
           <div className="h-6" />
 

@@ -1,3 +1,4 @@
+import Time from '../../components/Time'
 import Badge from '../../components/ui/Badge'
 import Button from '../../components/ui/Button'
 import EmptyState from '../../components/ui/EmptyState'
@@ -33,7 +34,7 @@ export default function RevisionTable({ state, hideStartup, hidePruned, onCompar
             <thead className="border-b border-gray-100 bg-gray-50">
               <tr>
                 <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Revision</th>
-                <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Applied</th>
+                <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Applied (your time)</th>
                 <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Type</th>
                 <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">User</th>
                 <th className="px-5 py-3 text-start text-theme-xs font-medium text-gray-500">Message</th>
@@ -45,7 +46,9 @@ export default function RevisionTable({ state, hideStartup, hidePruned, onCompar
               {revisions.map((rev, index) => (
                 <tr key={`${rev.rev_id}-${rev.apply_date}-${index}`}>
                   <td className="px-5 py-4 text-theme-sm font-medium text-gray-800">{rev.rev_id}</td>
-                  <td className="px-5 py-4 text-theme-sm text-gray-700">{rev.apply_date}</td>
+                  <td className="px-5 py-4 text-theme-sm text-gray-700">
+                    <Time value={rev.apply_date} />
+                  </td>
                   <td className="px-5 py-4 text-theme-sm text-gray-700">{rev.rev_type}</td>
                   <td className="px-5 py-4 text-theme-sm text-gray-700">{rev.user}</td>
                   <td className="px-5 py-4 text-theme-sm text-gray-700">{rev.message}</td>

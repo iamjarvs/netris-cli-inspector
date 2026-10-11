@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom'
 import AppShell from './components/layout/AppShell'
 import { CatalogProvider } from './context/CatalogContext'
 import { SiteProvider } from './context/SiteContext'
+import { ViewKindProvider } from './context/ViewKindContext'
 import ComparePage from './pages/ComparePage'
 import DevicesPage from './pages/DevicesPage'
 import DiffExamplesPage from './pages/DiffExamplesPage'
@@ -14,6 +15,7 @@ import WatchPage from './pages/WatchPage'
 export default function App() {
   return (
     <SiteProvider>
+      <ViewKindProvider>
       <CatalogProvider>
         <Routes>
           <Route element={<AppShell />}>
@@ -28,6 +30,7 @@ export default function App() {
           </Route>
         </Routes>
       </CatalogProvider>
+      </ViewKindProvider>
     </SiteProvider>
   )
 }

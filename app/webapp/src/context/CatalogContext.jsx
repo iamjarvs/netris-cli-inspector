@@ -10,6 +10,7 @@ export function CatalogProvider({ children }) {
   const value = {
     config: state.data?.config ?? [],
     show: state.data?.show ?? [],
+    intent: state.data?.intent ?? null,
     loading: state.loading,
     error: state.error,
   }
