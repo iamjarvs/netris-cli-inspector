@@ -120,7 +120,8 @@ export default function ExplorePage() {
       {run.loading && <LoadingState label="Running command…" />}
       {run.error && <ErrorState message={run.error} />}
       {run.results && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        // One result gets the full page width; columns are only for results that sit side by side.
+        <div className={`grid grid-cols-1 gap-4 ${Object.keys(run.results).length > 1 ? 'lg:grid-cols-2' : ''}`}>
           {Object.entries(run.results).map(([device, result]) => (
             <ResultPanel key={device} title={device} result={result} filename={`${device}-${isIntent ? 'intent' : effectiveCommand}`} />
           ))}
